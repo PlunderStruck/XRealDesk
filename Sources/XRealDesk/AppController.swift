@@ -68,6 +68,8 @@ final class AppController: ObservableObject {
     private var evacuatedFor: String?
     /// Stall watchdog: when rendering last (re)started after a deliberate pause.
     private var watchdogArmedAt: CFTimeInterval = 0
+    /// Record window positions at the next quiet moment (e.g. after the first check following a restore).
+    private var needsWindowSnapshot = true
     /// Capture size relative to the screen's pixels (`set capturescale=`, for measuring).
     private var captureScale: CGFloat = 1
     private var sharpDownsample = true
@@ -1184,18 +1186,22 @@ final class AppController: ObservableObject {
         // the glasses), so only look after something that can change them: a click (focus, the end
         // of a drag), a modifier key (⌘-Tab, ⌘-`, window-manager shortcuts) or another app coming
         // forward. Plus a slow safety net.
-        if screensUp, tickCount % 15 == 0 {                                                      // check 4×/s
+        // Never while typing (a big window list held WindowServer for up to 250 ms: keystrokes lagged,
+        // and modifier keys used to trigger it), and the full list only when the cheap on-screen
+        // list shows the glasses' windows actually changed.
+        let typing = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown) < 1.5
+        if screensUp, tickCount % 15 == 0, !typing {                                             // check 4×/s
             let front = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
             let since = now - lastWindowLook
             let changed = front != lastFrontPID
-                || CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown) < since
                 || CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp) < since
-                || CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .flagsChanged) < since
-            if changed || since > 15 {
+            if changed || since > 60 {
                 lastWindowLook = now
                 lastFrontPID = front
-                windows.noteFocus(screens: screens)
-                if settings.windowMemory, lastRestoreAt.map({ Date().timeIntervalSince($0) > 30 }) ?? true {
+                let windowsChanged = windows.noteFocus(screens: screens)
+                if settings.windowMemory, windowsChanged || since > 60 || needsWindowSnapshot,
+                   lastRestoreAt.map({ Date().timeIntervalSince($0) > 30 }) ?? true {
+                    needsWindowSnapshot = false
                     windows.snapshot(screens: screens, displaysStableFor: displaysStableFor)
                 }
             }

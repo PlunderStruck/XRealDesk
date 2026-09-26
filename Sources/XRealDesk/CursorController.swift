@@ -36,13 +36,15 @@ final class CursorController {
         // The glasses display acts as a wall: the pointer goes to the nearest point on a real screen.
         // (Not to a remembered "last good" spot: after displays are rearranged that spot can lie
         // inside the glasses display, and the pointer froze, warped back into it 60 times a second.)
-        if let g = guardDisplay, CursorController.guardable(g), CGDisplayBounds(g).insetBy(dx: -0.5, dy: -0.5).contains(loc),
+        // Cheapest test first: the full check asks WindowServer about every display (~2 ms of its
+        // time), which 60×/s slowed everything on screen; now it only runs when the pointer is there.
+        if let g = guardDisplay, DisplayBoundsCache.bounds(g).insetBy(dx: -0.5, dy: -0.5).contains(loc), CursorController.guardable(g),
            let target = CursorController.nearestPoint(to: loc, excluding: g) {
             warp(to: target, now: now)
             guardWarps += 1
             if now - guardWindowStart >= 1 {
                 if guardWarps > 20 {
-                    Log.error("Cursor guard acted \(guardWarps)× in 1 s: pointer \(loc), glasses display \(CGDisplayBounds(g)), sent to \(target)")
+                    Log.error("Cursor guard acted \(guardWarps)× in 1 s: pointer \(loc), glasses display \(DisplayBoundsCache.bounds(g)), sent to \(target)")
                 }
                 guardWarps = 0
                 guardWindowStart = now
@@ -50,7 +52,7 @@ final class CursorController {
             return nil
         }
 
-        let cursorIndex = screens.first { CGDisplayBounds($0.id).contains(loc) }?.index
+        let cursorIndex = screens.first { DisplayBoundsCache.bounds($0.id).contains(loc) }?.index
 
         // 2. Gaze follow.
         guard gazeFollowEnabled, let cursorIndex, let gazeIndex, gazeIndex != cursorIndex,
@@ -67,10 +69,10 @@ final class CursorController {
         }
         guard now - candidateSince >= dwellSeconds else { return cursorIndex }
 
-        let fb = CGDisplayBounds(from.id)
+        let fb = DisplayBoundsCache.bounds(from.id)
         savedPositions[cursorIndex] = CGPoint(x: (loc.x - fb.minX) / fb.width, y: (loc.y - fb.minY) / fb.height)
         let rel = savedPositions[gazeIndex] ?? CGPoint(x: 0.5, y: 0.5)
-        let tb = CGDisplayBounds(to.id)
+        let tb = DisplayBoundsCache.bounds(to.id)
         let target = CGPoint(x: tb.minX + rel.x * tb.width, y: tb.minY + rel.y * tb.height)
         warp(to: target, now: now)
         candidate = nil
@@ -81,11 +83,11 @@ final class CursorController {
     /// The glasses display is extended and doesn't overlap any other display.
     static func guardable(_ g: CGDirectDisplayID) -> Bool {
         guard CGDisplayIsInMirrorSet(g) == 0 else { return false }
-        let b = CGDisplayBounds(g)
+        let b = DisplayBoundsCache.bounds(g)
         var ids = [CGDirectDisplayID](repeating: 0, count: 16)
         var n: UInt32 = 0
         CGGetActiveDisplayList(16, &ids, &n)
-        return !ids.prefix(Int(n)).contains { $0 != g && CGDisplayBounds($0).intersects(b) }
+        return !ids.prefix(Int(n)).contains { $0 != g && DisplayBoundsCache.bounds($0).intersects(b) }
     }
 
     /// Closest point to `p` on any active display other than `excluded` (1 pt inside its edge).
@@ -95,7 +97,7 @@ final class CursorController {
         CGGetActiveDisplayList(16, &ids, &n)
         var best: (CGPoint, CGFloat)?
         for id in ids.prefix(Int(n)) where id != excluded {
-            let b = CGDisplayBounds(id).insetBy(dx: 1, dy: 1)
+            let b = DisplayBoundsCache.bounds(id).insetBy(dx: 1, dy: 1)
             guard b.width > 0, b.height > 0 else { continue }
             let q = CGPoint(x: min(max(p.x, b.minX), b.maxX), y: min(max(p.y, b.minY), b.maxY))
             let d = hypot(q.x - p.x, q.y - p.y)
@@ -105,7 +107,7 @@ final class CursorController {
     }
 
     func moveCursor(toScreen id: CGDirectDisplayID, now: TimeInterval) {
-        let b = CGDisplayBounds(id)
+        let b = DisplayBoundsCache.bounds(id)
         warp(to: CGPoint(x: b.midX, y: b.midY), now: now)
     }
 

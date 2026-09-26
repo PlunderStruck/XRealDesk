@@ -104,7 +104,9 @@ final class WindowKeeper {
     func snapshot(screens: [(index: Int, id: CGDirectDisplayID)], displaysStableFor: TimeInterval) {
         guard !suspended, !screens.isEmpty else { return }
         let now = Date()
-        let continuous = now.timeIntervalSince(lastSnapshotTime) < 5
+        // Nothing about the displays changed since the previous snapshot (snapshots are now rare:
+        // only when the glasses' windows change), so a window that left the glasses was moved by you.
+        let continuous = displaysStableFor > now.timeIntervalSince(lastSnapshotTime)
         let live = liveWindows(onScreenOnly: false)
         let liveIDs = Set(live.map(\.id))
         let presentScreens = Set(screens.map(\.index))
@@ -300,13 +302,29 @@ final class WindowKeeper {
 
     // MARK: 2. Keyboard focus follows your eyes
 
-    /// Remember which window you're using on which screen. Call a few times a second.
-    func noteFocus(screens: [(index: Int, id: CGDirectDisplayID)]) {
-        guard let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, front != ownPID else { return }
-        guard let w = liveWindows(onScreenOnly: true).first(where: { $0.pid == front }),
-              let i = WindowKeeper.screenIndex(of: w.bounds, screens: screens) else { return }
-        lastFocused[i] = w.id
+    /// Remember which window you're using on which screen. Uses the cheap on-screen window list
+    /// (~3 ms). Returns whether the windows on the glasses changed (moved, resized, opened, closed)
+    /// since the last call: only then is the full (all-Spaces) list worth fetching for memory —
+    /// that one can hold WindowServer for up to a quarter second with many windows open.
+    @discardableResult
+    func noteFocus(screens: [(index: Int, id: CGDirectDisplayID)]) -> Bool {
+        let live = liveWindows(onScreenOnly: true)
+        var sig = Hasher()
+        for w in live where WindowKeeper.screenIndex(of: w.bounds, screens: screens) != nil {
+            sig.combine(w.id); sig.combine(Int(w.bounds.minX)); sig.combine(Int(w.bounds.minY))
+            sig.combine(Int(w.bounds.width)); sig.combine(Int(w.bounds.height))
+        }
+        let signature = sig.finalize()
+        let changed = signature != lastGlassesSignature
+        lastGlassesSignature = signature
+        if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, front != ownPID,
+           let w = live.first(where: { $0.pid == front }),
+           let i = WindowKeeper.screenIndex(of: w.bounds, screens: screens) {
+            lastFocused[i] = w.id
+        }
+        return changed
     }
+    private var lastGlassesSignature = 0
 
     /// Give keyboard focus to the window you last used on `screen` (or its frontmost window).
     func focus(screen: Int, displayID: CGDirectDisplayID) {
