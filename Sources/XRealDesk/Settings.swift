@@ -194,9 +194,9 @@ final class Settings: ObservableObject {
     init() {
         d.register(defaults: [
             "screenCount": 3, "rows": 1, "resolution": ResolutionPreset.default.id, "hiDPI": false,
-            "refreshRate": 60, "glassesIsMain": false,
+            "refreshRate": 120, "glassesIsMain": false,
             "screenWidthDegrees": 33.0, "gapDegrees": 1.5, "curve": 0.55, "tiltDegrees": 0.0,
-            "trackingMode": TrackingMode.anchored.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
+            "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
             "predictionMs": 14.0, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
             "sharpen": 0.35, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
             "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "glassesOffMoveDelay": 10.0, "showInDock": true,
@@ -217,7 +217,7 @@ final class Settings: ObservableObject {
         gapDegrees = d.double(forKey: "gapDegrees")
         curve = d.double(forKey: "curve")
         tiltDegrees = d.double(forKey: "tiltDegrees")
-        trackingMode = TrackingMode(rawValue: d.string(forKey: "trackingMode") ?? "") ?? .anchored
+        trackingMode = TrackingMode(rawValue: d.string(forKey: "trackingMode") ?? "") ?? .smart
         cursorFollowsGaze = d.bool(forKey: "cursorFollowsGaze")
         keyboardFollowsGaze = d.bool(forKey: "keyboardFollowsGaze")
         windowMemory = d.bool(forKey: "windowMemory")
@@ -265,6 +265,34 @@ final class Settings: ObservableObject {
             $0.count == screenCount && $0.rows == rows && $0.resolution == resolution
                 && abs($0.widthDegrees - screenWidthDegrees) < 0.5 && abs($0.curve - curve) < 0.01
         }?.id
+    }
+
+    /// The settings that work best on the Air 2 Pro (measured over many sessions). Leaves your
+    /// layout (screens, size, curve, placement) alone.
+    func applyRecommended() {
+        trackingMode = .smart
+        refreshRate = 120
+        renderScale = 2
+        lensCorrection = true
+        predictionMs = 14
+        stabilityDegrees = 0.03
+        followLag = 0.3
+        cursorFollowsGaze = true
+        keyboardFollowsGaze = true
+        windowMemory = true
+        glassesOffMoveDelay = 10
+        autoExtendDisplay = true
+        mirrorWhenQuitting = true
+        showHUD = true
+        hotkeysEnabled = true
+        resetLook()
+    }
+
+    /// True when every recommended value is already set.
+    var isRecommended: Bool {
+        trackingMode == .smart && refreshRate == 120 && renderScale == 2 && lensCorrection && predictionMs == 14
+            && abs(stabilityDegrees - 0.03) < 0.001 && cursorFollowsGaze && keyboardFollowsGaze && windowMemory
+            && autoExtendDisplay && mirrorWhenQuitting
     }
 
     func resetLook() {

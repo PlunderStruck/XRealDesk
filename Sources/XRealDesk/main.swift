@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import ScreenCaptureKit
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -8,6 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
     private var settingsWindow: NSWindow?
+    private var setupWindow: NSWindow?
+    private let setupModel = SetupModel()
+    private let settingsNav = SettingsNav()
     private var panelWindow: NSPanel?
     private let quickMenu = NSMenu()
     private var cancellables = Set<AnyCancellable>()
@@ -27,7 +31,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rootView: ControlPanel(app: app, settings: app.settings, openSettings: { [weak self] in
                 self?.popover.performClose(nil)
                 self?.showSettings()
+            }, openSetup: { [weak self] step in
+                self?.popover.performClose(nil)
+                self?.showSetup(step)
             }))
+        setupModel.onFinish = { [weak self] in
+            UserDefaults.standard.set(true, forKey: "didOnboard")
+            self?.setupWindow?.close()
+        }
+        // Restarting for a permission: reopen the setup assistant where it was.
+        app.onBeforeRelaunch = { [weak self] in
+            guard let self, self.setupWindow?.isVisible == true else { return }
+            UserDefaults.standard.set(self.setupModel.step.rawValue, forKey: "resumeSetupStep")
+        }
 
         app.onShowControlPanel = { [weak self] in self?.showControlPanel() }
         app.start()
@@ -62,10 +78,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.dumpUI()
         }
 
-        let firstRun = !UserDefaults.standard.bool(forKey: "didOnboard")
-        if firstRun || !app.permissionGranted || preview {
-            UserDefaults.standard.set(true, forKey: "didOnboard")
-            showSettings()
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.xrealdesk.showSetup"),
+                                                            object: nil, queue: .main) { [weak self] note in
+            self?.showSetup((note.object as? String).flatMap(Int.init).flatMap(SetupModel.Step.init(rawValue:)))
+        }
+
+        let resume = UserDefaults.standard.object(forKey: "resumeSetupStep") as? Int
+        UserDefaults.standard.removeObject(forKey: "resumeSetupStep")
+        if let resume {
+            showSetup(SetupModel.Step(rawValue: resume))
+        } else if !UserDefaults.standard.bool(forKey: "didOnboard") {
+            showSetup(.connect)
+        } else if !app.permissionGranted {
+            showSetup(.permissions)
         }
     }
 
@@ -119,8 +144,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Popover under the menu-bar icon if it's visible; otherwise (icon hidden behind the notch,
     /// or opened from the Dock / ⌃⌥X) a floating panel near the mouse.
-    func showControlPanel() {
-        if let button = statusItem?.button, let w = button.window,
+    func showControlPanel(forceWindow: Bool = false) {
+        if !forceWindow, let button = statusItem?.button, let w = button.window,
            w.occlusionState.contains(.visible), let screen = w.screen,
            screen.frame.contains(w.frame.origin), !NSApp.isActive || panelWindow?.isVisible != true {
             if popover.isShown { popover.performClose(nil); return }
@@ -133,6 +158,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let host = NSHostingController(rootView: ControlPanel(app: app, settings: app.settings, openSettings: { [weak self] in
                 self?.panelWindow?.orderOut(nil)
                 self?.showSettings()
+            }, openSetup: { [weak self] step in
+                self?.panelWindow?.orderOut(nil)
+                self?.showSetup(step)
             }))
             let p = NSPanel(contentViewController: host)
             p.title = "XRealDesk"
@@ -213,6 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(gaze)
         menu.addItem(.separator())
         menu.addItem(item("Settings…", #selector(showSettingsAction), key: ","))
+        menu.addItem(item("Setup Assistant…", #selector(showSetupAction)))
         menu.addItem(item("Show Log", #selector(showLog)))
         menu.addItem(item("Save Glasses Snapshot", #selector(snapshot)))
         menu.addItem(.separator())
@@ -236,42 +265,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc private func toggleGaze() { app.settings.cursorFollowsGaze.toggle() }
     @objc private func showSettingsAction() { showSettings() }
+    @objc private func showSetupAction() { showSetup(nil) }
     @objc private func snapshot() { app.requestSnapshot() }
     @objc private func showLog() { NSWorkspace.shared.open(Log.fileURL) }
     @objc private func quit() { NSApp.terminate(nil) }
 
+    /// Diagnostics: captures the control panel, every Settings tab and every setup step as they really
+    /// look (ScreenCaptureKit), as PNGs in ~/Library/Logs/XRealDesk/ui-*.png.
     private func dumpUI() {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/XRealDesk")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let host = NSHostingView(rootView: ControlPanel(app: app, settings: app.settings, openSettings: {}))
-        host.frame = NSRect(origin: .zero, size: host.fittingSize)
-        let offscreen = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        offscreen.contentView = host
-        offscreen.appearance = NSAppearance(named: .darkAqua)
-        offscreen.setFrameOrigin(NSPoint(x: -10000, y: -10000))
-        offscreen.orderFrontRegardless()
-        showSettings()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            func save(_ view: NSView?, _ name: String) {
-                guard let view, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
-                view.cacheDisplay(in: view.bounds, to: rep)
-                try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent(name))
+        let savedStep = setupModel.step, savedTab = settingsNav.tab
+        Task { @MainActor in
+            func shoot(_ window: NSWindow?, _ name: String) async {
+                guard let window else { return }
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
+                      let scw = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else { return }
+                let cfg = SCStreamConfiguration()
+                cfg.width = Int(scw.frame.width * 2); cfg.height = Int(scw.frame.height * 2)
+                cfg.showsCursor = false
+                guard let img = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: scw),
+                                                                            configuration: cfg),
+                      let data = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) else { return }
+                try? data.write(to: dir.appendingPathComponent("ui-\(name).png"))
             }
-            save(host, "ui-control-panel.png")
-            save(self?.settingsWindow?.contentView, "ui-settings.png")
-            offscreen.orderOut(nil)
-            Log.info("Saved UI renders to \(dir.path)")
+            self.popover.performClose(nil)
+            self.showControlPanel(forceWindow: true)
+            await shoot(self.panelWindow, "panel")
+            self.panelWindow?.orderOut(nil)
+            self.showSettings()
+            for t in 0..<5 { self.settingsNav.tab = t; await shoot(self.settingsWindow, "settings-\(t)") }
+            self.settingsNav.tab = savedTab
+            self.settingsWindow?.orderOut(nil)
+            for s in SetupModel.Step.allCases { self.showSetup(s); await shoot(self.setupWindow, "setup-\(s.rawValue)") }
+            self.setupModel.step = savedStep
+            self.setupWindow?.orderOut(nil)
+            Log.info("Saved UI captures to \(dir.path)")
         }
+    }
+
+    private func showSetup(_ step: SetupModel.Step?) {
+        if let step { setupModel.step = step }
+        if setupWindow == nil {
+            let host = NSHostingController(rootView: SetupAssistant(model: setupModel, app: app, settings: app.settings))
+            let w = NSWindow(contentViewController: host)
+            w.title = "Set Up XRealDesk"
+            w.styleMask = [.titled, .closable, .fullSizeContentView]
+            w.titlebarAppearsTransparent = true
+            w.isReleasedWhenClosed = false
+            w.center()
+            setupWindow = w
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        setupWindow?.makeKeyAndOrderFront(nil)
     }
 
     private func showSettings() {
         if settingsWindow == nil {
-            let host = NSHostingController(rootView: SettingsView(app: app, settings: app.settings, login: LoginItemModel()))
+            let host = NSHostingController(rootView: SettingsView(nav: settingsNav, app: app, settings: app.settings, login: LoginItemModel(),
+                                                                  openSetup: { [weak self] step in self?.showSetup(step) }))
             let w = NSWindow(contentViewController: host)
-            w.title = "XRealDesk"
-            w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            w.title = "XRealDesk Settings"
+            w.styleMask = [.titled, .closable, .miniaturizable]
             w.isReleasedWhenClosed = false
-            w.setContentSize(NSSize(width: 560, height: 820))
             w.center()
             settingsWindow = w
         }

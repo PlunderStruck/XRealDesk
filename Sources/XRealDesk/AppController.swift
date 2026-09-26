@@ -16,6 +16,8 @@ final class LiveState: ObservableObject {
     @Published var viewYawPitch = SIMD2<Float>(0, 0)
     @Published var renderFPS: Double = 0
     @Published var imuRate: Double = 0
+    /// The glasses are in their side-by-side 3D mode (button), running at 60 Hz.
+    @Published var sideBySide = false
 }
 
 final class AppController: ObservableObject {
@@ -32,6 +34,10 @@ final class AppController: ObservableObject {
     @Published private(set) var needsRelaunchForPermission = false
     /// Accessibility permission (window memory + keyboard focus following your eyes).
     @Published private(set) var accessibilityGranted = WindowKeeper.isTrusted
+    /// Taken off your face (wear sensor): drawing is paused.
+    @Published private(set) var glassesOffFace = false
+    /// Called right before XRealDesk restarts itself (so the UI can remember where it was).
+    var onBeforeRelaunch: (() -> Void)?
     /// Fast-changing values (gaze, fps…) live in their own object so only the small views that
     /// show them re-render, not the whole settings UI.
     let live = LiveState()
@@ -51,6 +57,7 @@ final class AppController: ObservableObject {
     /// Side-by-side 3D with real depth (experimental; the flat picture felt better on the Air 2 Pro).
     private var stereoDepth = false
     private var sharpDownsample = true
+    private var directRender = true
     private var renderer: Renderer?
     private let cursor = CursorController()
     private let windows = WindowKeeper()
@@ -190,6 +197,10 @@ final class AppController: ObservableObject {
             case "height": if let x = Double(v) { self.settings.tiltDegrees = x }
             case "mode": if let m = TrackingMode(rawValue: v) { self.setMode(m) }
             case "lens": self.settings.lensCorrection = v == "1"
+            case "refresh": if let x = Int(v), x == 60 || x == 120 { self.settings.refreshRate = x }
+            case "direct":   // 1 = single-pass renderer (default), 0 = two-pass (supersample + warp)
+                self.directRender = v != "0"
+                self.pushConfig()
             case "filter":   // 1 = Catmull-Rom downsample of the supersampled image, 0 = one bilinear tap
                 self.sharpDownsample = v != "0"
                 self.pushConfig()
@@ -573,6 +584,7 @@ final class AppController: ObservableObject {
     private func glassesTakenOff() {
         Log.info("Glasses taken off: pausing")
         glassesOff = true
+        glassesOffFace = true
         compositor?.stop()
         stopCaptures()
         glassesOffWork?.cancel()
@@ -596,6 +608,7 @@ final class AppController: ObservableObject {
     private func glassesPutOn() {
         Log.info("Glasses put on\(screensParkedForGlassesOff ? ": bringing the glasses screens back" : ": resuming")")
         glassesOff = false
+        glassesOffFace = false
         glassesOffWork?.cancel()
         glassesOffWork = nil
         let parked = screensParkedForGlassesOff
@@ -658,17 +671,23 @@ final class AppController: ObservableObject {
                 self.permissionGranted = true
                 Log.info("Screen Recording permission granted")
                 if !self.virtualDisplays.screens.isEmpty { self.syncCaptures(restartAll: true) }
-                // If capture still fails after granting, macOS wants a relaunch.
+                // If capture still fails after granting, macOS wants a relaunch: do it for you.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                     guard let self else { return }
                     let failing = self.captures.contains { if case .failed = $0.status { return true }; return false }
                     self.needsRelaunchForPermission = failing
+                    if failing {
+                        Log.info("Screen Recording needs a restart to take effect; restarting")
+                        self.hud("Restarting XRealDesk to finish turning on Screen Recording…")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.relaunch() }
+                    }
                 }
             }
         }
     }
 
     func relaunch() {
+        onBeforeRelaunch?()
         let path = Bundle.main.bundlePath
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -939,6 +958,7 @@ final class AppController: ObservableObject {
         if live.cursorScreen != cursorIndex { live.cursorScreen = cursorIndex }
         if simd_length(out.viewYawPitch - live.viewYawPitch) > SpatialMath.radians(0.3) { live.viewYawPitch = out.viewYawPitch }
         if abs(out.fps - live.renderFPS) > 0.5 { live.renderFPS = out.fps }
+        if live.sideBySide != out.sideBySide { live.sideBySide = out.sideBySide }
         let rate = hid.sampleRate
         if abs(rate - live.imuRate) > 5 { live.imuRate = rate }
         let capturing = captures.filter { $0.status == .running }.count
@@ -1042,7 +1062,7 @@ final class AppController: ObservableObject {
         c.layout = layout
         c.style = Renderer.Style(sharpen: Float(settings.sharpen), cornerRadius: Float(settings.cornerRadius),
                                  supersample: Float(settings.renderScale), lensCorrection: settings.lensCorrection,
-                                 sharpDownsample: sharpDownsample)
+                                 sharpDownsample: sharpDownsample, direct: directRender)
         c.mode = settings.trackingMode
         c.predictionSeconds = settings.predictionMs / 1000
         c.stabilityRadians = SpatialMath.radians(Float(settings.stabilityDegrees))

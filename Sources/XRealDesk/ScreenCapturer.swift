@@ -11,14 +11,18 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     final class Frame: @unchecked Sendable {
         let texture: MTLTexture
+        /// The same pixels read without sRGB decoding (filtering in gamma space keeps text weight).
+        let gammaTexture: MTLTexture
         let seq: UInt64
         /// When the frame reached us (CACurrentMediaTime).
         let arrival: CFTimeInterval
         // Keep the CoreVideo objects alive for as long as the texture is used.
-        private let cvTexture: CVMetalTexture
+        private let cvTextures: [CVMetalTexture]
         private let pixelBuffer: CVPixelBuffer
-        init(texture: MTLTexture, cvTexture: CVMetalTexture, pixelBuffer: CVPixelBuffer, seq: UInt64, arrival: CFTimeInterval) {
-            self.texture = texture; self.cvTexture = cvTexture; self.pixelBuffer = pixelBuffer; self.seq = seq; self.arrival = arrival
+        init(texture: MTLTexture, gammaTexture: MTLTexture, cvTextures: [CVMetalTexture], pixelBuffer: CVPixelBuffer,
+             seq: UInt64, arrival: CFTimeInterval) {
+            self.texture = texture; self.gammaTexture = gammaTexture; self.cvTextures = cvTextures
+            self.pixelBuffer = pixelBuffer; self.seq = seq; self.arrival = arrival
         }
     }
 
@@ -200,8 +204,11 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         var cvTex: CVMetalTexture?
         let r = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, pb, nil, .bgra8Unorm_srgb, w, h, 0, &cvTex)
         guard r == kCVReturnSuccess, let cvTex, let tex = CVMetalTextureGetTexture(cvTex) else { return }
+        var cvGamma: CVMetalTexture?
+        guard CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, pb, nil, .bgra8Unorm, w, h, 0, &cvGamma) == kCVReturnSuccess,
+              let cvGamma, let gammaTex = CVMetalTextureGetTexture(cvGamma) else { return }
         seq &+= 1
-        let frame = Frame(texture: tex, cvTexture: cvTex, pixelBuffer: pb, seq: seq, arrival: arrival)
+        let frame = Frame(texture: tex, gammaTexture: gammaTex, cvTextures: [cvTex, cvGamma], pixelBuffer: pb, seq: seq, arrival: arrival)
         frameLock.withLock { $0 = frame }
     }
 }

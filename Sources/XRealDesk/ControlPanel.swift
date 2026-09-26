@@ -2,145 +2,153 @@ import SwiftUI
 import simd
 import XRCore
 
-/// The menu-bar popover: everything you touch day to day, adjustable live while wearing the glasses.
+/// The menu-bar popover: status, layout and the few controls you touch day to day, live while
+/// wearing the glasses. Everything else is in Settings; first-time setup in the setup assistant.
 struct ControlPanel: View {
     @ObservedObject var app: AppController
     @ObservedObject var settings: Settings
     var openSettings: () -> Void
+    var openSetup: (SetupModel.Step?) -> Void = { _ in }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header
-            presets
-            LayoutMap(app: app, live: app.live, settings: settings)
-                .frame(height: 150)
-            VStack(spacing: 10) {
-                HStack {
-                    Label("Screens", systemImage: "rectangle.on.rectangle")
-                    Spacer()
+        VStack(alignment: .leading, spacing: 12) {
+            PanelHeader(app: app, live: app.live)
+            if let problem { problemBanner(problem) }
+            Card(padding: 10) {
+                LayoutMap(app: app, live: app.live, settings: settings)
+                    .frame(height: 128)
+                PresetTiles(settings: settings, columns: 6, height: 38)
+                HStack(spacing: 10) {
                     Stepper(value: $settings.screenCount, in: 1...Settings.maxScreens) {
-                        Text("\(settings.screenCount)").monospacedDigit().frame(minWidth: 18)
+                        Label("\(settings.screenCount) screen\(settings.screenCount == 1 ? "" : "s")", systemImage: "rectangle.on.rectangle")
+                            .monospacedDigit()
                     }
+                    Spacer()
                     Picker("", selection: $settings.rows) {
-                        Text("1 row").tag(1)
-                        Text("2 rows").tag(2)
-                        Text("3 rows").tag(3)
+                        Text("1 row").tag(1); Text("2").tag(2); Text("3").tag(3)
                     }
-                    .labelsHidden()
-                    .frame(width: 84)
+                    .labelsHidden().pickerStyle(.segmented).frame(width: 128)
                     .disabled(settings.screenCount < 2)
                 }
-                PanelSlider(symbol: "arrow.up.left.and.arrow.down.right", title: "Size", value: $settings.screenWidthDegrees,
+                .font(.callout)
+            }
+            Card(padding: 12) {
+                ValueSlider(symbol: "arrow.up.left.and.arrow.down.right", title: "Size", value: $settings.screenWidthDegrees,
                             range: 16...100, step: 1) { String(format: "%.0f°", $0) }
-                PanelSlider(symbol: "rectangle.portrait.arrowtriangle.2.outward", title: "Curve", value: $settings.curve,
+                ValueSlider(symbol: "rectangle.portrait.arrowtriangle.2.outward", title: "Curve", value: $settings.curve,
                             range: 0...1, step: 0.05) { $0 < 0.01 ? "Flat" : String(format: "%.0f%%", $0 * 100) }
-                PanelSlider(symbol: "arrow.up.and.down", title: "Height", value: $settings.tiltDegrees,
+                ValueSlider(symbol: "arrow.up.and.down", title: "Height", value: $settings.tiltDegrees,
                             range: -30...30, step: 1) { String(format: "%+.0f°", $0) }
-                PanelSlider(symbol: "rotate.right", title: "Tilt", value: $settings.rollDegrees,
-                            range: -15...15, step: 0.5) { $0 == 0 ? "Level" : String(format: "%+.1f°", $0) }
-                PanelSlider(symbol: "scope", title: "Stability", value: $settings.stabilityDegrees,
-                            range: 0...0.4, step: 0.02) { $0 < 0.005 ? "Off" : String(format: "%.2f°", $0) }
-                PanelSlider(symbol: "sun.max", title: "Brightness", value: $settings.brightness,
+                ValueSlider(symbol: "sun.max", title: "Brightness", value: $settings.brightness,
                             range: 0.2...1, step: 0.05) { String(format: "%.0f%%", $0 * 100) }
             }
-            Picker("", selection: Binding(get: { settings.trackingMode }, set: { app.setMode($0) })) {
-                ForEach(TrackingMode.allCases) { Text($0.title).tag($0) }
+            Card(padding: 10) {
+                ModeTiles(app: app, settings: settings, height: 40)
+                Text(settings.trackingMode.detail).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            Text(settings.trackingMode.detail).font(.caption).foregroundStyle(.secondary)
-            if settings.trackingMode == .smart {
-                Toggle("Flick your head to reposition", isOn: $settings.smartFlick).font(.callout)
-                if settings.smartFlick {
-                    PanelSlider(symbol: "hand.draw", title: "Flick", value: $settings.flickSensitivity,
-                                range: 0...1, step: 0.05) { String(format: "%.0f%%", $0 * 100) }
-                }
-            }
-            if settings.trackingMode == .smoothFollow || settings.trackingMode == .smart {
-                PanelSlider(symbol: "hare", title: "Follow", value: Binding(get: { 1.05 - settings.followLag },
-                                                                            set: { settings.followLag = 1.05 - $0 }),
-                            range: 0.05...1.0, step: 0.05) { String(format: "%.0f%%", $0 * 100) }
-            }
-
-            HStack {
-                Button { app.recenter() } label: { Label("Recenter", systemImage: "scope") }
-                    .keyboardShortcut("r")
-                Toggle(isOn: $settings.cursorFollowsGaze) { Text("Cursor follows gaze") }
-                    .toggleStyle(.checkbox)
-                    .font(.callout)
-                Spacer()
-            }
-            Divider()
-            HStack {
-                Button("Settings…", action: openSettings)
-                Spacer()
-                Button("Quit") { NSApp.terminate(nil) }
-            }
-            .buttonStyle(.borderless)
+            footer
         }
-        .padding(16)
+        .padding(14)
         .frame(width: 380)
     }
 
-    private var header: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 9, height: 9)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(app.deviceInfo?.model ?? "XRealDesk").font(.headline)
-                Text(app.statusSummary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+    private var footer: some View {
+        HStack(spacing: 8) {
+            Button { app.recenter() } label: { Label("Recenter", systemImage: "scope") }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut("r")
+                .help("Put the screens in front of you (⌃⌥R)")
+            Toggle(isOn: $settings.cursorFollowsGaze) {
+                Image(systemName: "cursorarrow.rays")
             }
+            .toggleStyle(.button)
+            .help("Cursor jumps to the screen you look at (⌃⌥G)")
             Spacer()
-            if app.trackingHealthy {
-                FPSLabel(live: app.live)
-            }
+            Button { openSetup(nil) } label: { Image(systemName: "wand.and.stars") }
+                .help("Setup assistant")
+            Button(action: openSettings) { Image(systemName: "gearshape") }
+                .help("Settings")
+            Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }
+                .help("Quit XRealDesk (the glasses go back to mirroring your Mac)")
         }
+        .controlSize(.large)
     }
 
-    private var statusColor: Color {
-        if app.trackingHealthy && (app.glassesDisplayName != nil || app.preview) { return .green }
-        if case .failed = app.glassesState { return .red }
-        return .orange
+    private struct Problem { let icon: String; let text: String; let action: String; let step: SetupModel.Step }
+
+    private var problem: Problem? {
+        if app.preview { return nil }
+        if case .searching = app.glassesState {
+            return Problem(icon: "cable.connector", text: "Plug in your XREAL glasses", action: "Help", step: .connect)
+        }
+        if case .failed(let m) = app.glassesState {
+            return Problem(icon: "exclamationmark.triangle", text: m, action: "Help", step: .connect)
+        }
+        if !app.permissionGranted || app.needsRelaunchForPermission {
+            return Problem(icon: "lock", text: "Allow Screen Recording to show your screens", action: "Allow", step: .permissions)
+        }
+        if case .tracking = app.glassesState, app.glassesDisplayName == nil {
+            return Problem(icon: "display.trianglebadge.exclamationmark", text: "No picture from the glasses yet", action: "Help", step: .connect)
+        }
+        return nil
     }
 
-    private var presets: some View {
-        let current = settings.matchingPreset
-        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 6), spacing: 8) {
-            ForEach(LayoutPreset.all) { p in
-                Button { settings.apply(p) } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: p.symbol).font(.system(size: 16))
-                        Text(p.title).font(.system(size: 9.5, weight: .medium)).lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .background(RoundedRectangle(cornerRadius: 8)
-                        .fill(current == p.id ? Color.accentColor.opacity(0.22) : Color.primary.opacity(0.06)))
-                    .overlay(RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(current == p.id ? Color.accentColor : .clear, lineWidth: 1.2))
-                }
-                .buttonStyle(.plain)
-                .help(p.title)
-            }
+    private func problemBanner(_ p: Problem) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: p.icon).foregroundStyle(.orange)
+            Text(p.text).font(.callout).fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            Button(p.action) { openSetup(p.step) }.buttonStyle(.borderedProminent).controlSize(.small)
         }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.orange.opacity(0.12)))
     }
 }
 
-struct PanelSlider: View {
-    let symbol: String
-    let title: String
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-    let step: Double
-    let format: (Double) -> String
+/// Device, status and frame rate.
+struct PanelHeader: View {
+    @ObservedObject var app: AppController
+    @ObservedObject var live: LiveState
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: symbol).frame(width: 18).foregroundStyle(.secondary)
-            Text(title).frame(width: 70, alignment: .leading)
-            Slider(value: Binding(get: { value }, set: { value = step > 0 ? ($0 / step).rounded() * step : $0 }), in: range)
-            Text(format(value)).monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+        HStack(spacing: 10) {
+            ZStack {
+                Circle().fill(Color.accentColor.opacity(0.15)).frame(width: 34, height: 34)
+                Image(systemName: "eyeglasses").font(.system(size: 16, weight: .semibold)).foregroundStyle(.tint)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(app.deviceInfo?.model ?? "XRealDesk").font(.headline)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            StatusPill(tone: tone, text: pill)
         }
+    }
+
+    private var ready: Bool { app.trackingHealthy && (app.glassesDisplayName != nil || app.preview) && app.permissionGranted }
+
+    private var tone: StatusPill.Tone {
+        if app.glassesOffFace { return .working }
+        if ready { return .good }
+        if case .failed = app.glassesState { return .problem }
+        return .working
+    }
+
+    private var pill: String {
+        if app.glassesOffFace { return "Paused" }
+        if ready { return live.sideBySide ? "3D · \(Int(live.renderFPS.rounded())) fps" : "\(Int(live.renderFPS.rounded())) fps" }
+        switch app.glassesState {
+        case .searching: return "Not connected"
+        case .connecting: return "Connecting"
+        case .failed: return "Problem"
+        case .tracking: return "Starting"
+        }
+    }
+
+    private var subtitle: String {
+        if app.glassesOffFace { return "Glasses off: paused until you put them on" }
+        return app.statusSummary
     }
 }
 

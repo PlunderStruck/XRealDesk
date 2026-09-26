@@ -33,6 +33,9 @@ final class Renderer {
         var lensCorrection = true
         /// Shrink the supersampled image with a Catmull-Rom filter instead of one bilinear tap.
         var sharpDownsample = true
+        /// Single-pass renderer: each glasses pixel is traced through the lens map onto the screens
+        /// and filtered once (instead of drawing a 2x image and warping it).
+        var direct = true
     }
 
     /// Pinhole intrinsics of the glasses' image, in `calibrated` pixel units.
@@ -96,6 +99,10 @@ final class Renderer {
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
     private let warpPipeline: MTLRenderPipelineState
+    private let directPipeline: MTLRenderPipelineState
+    private let dummyTexture: MTLTexture
+    private var cursorGammaTexture: MTLTexture?
+    private var mipGamma: [Int: MTLTexture] = [:]
     private let sampler: MTLSamplerState
     private let linearSampler: MTLSamplerState
     private var eyeTextures: [MTLTexture?] = [nil, nil]
@@ -134,6 +141,11 @@ final class Renderer {
             wd.fragmentFunction = lib.makeFunction(name: "warpFragment")
             wd.colorAttachments[0].pixelFormat = pixelFormat
             warpPipeline = try device.makeRenderPipelineState(descriptor: wd)
+            let dd = MTLRenderPipelineDescriptor()
+            dd.vertexFunction = lib.makeFunction(name: "warpVertex")
+            dd.fragmentFunction = lib.makeFunction(name: "directFragment")
+            dd.colorAttachments[0].pixelFormat = pixelFormat
+            directPipeline = try device.makeRenderPipelineState(descriptor: dd)
         } catch {
             Log.error("Metal pipeline: \(error)")
             return nil
@@ -154,6 +166,10 @@ final class Renderer {
         ld.tAddressMode = .clampToZero
         guard let l = device.makeSamplerState(descriptor: ld) else { return nil }
         linearSampler = l
+        let dt = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: 1, height: 1, mipmapped: false)
+        dt.usage = [.shaderRead]
+        guard let dummy = device.makeTexture(descriptor: dt) else { return nil }
+        dummyTexture = dummy
     }
 
     /// Install the glasses' lens-distortion maps (render thread): both-eye average, left, right.
@@ -176,7 +192,7 @@ final class Renderer {
 
     /// Upload the current mouse cursor image (render thread).
     func setCursorImage(_ image: CGImage?) {
-        guard let image else { cursorTexture = nil; return }
+        guard let image else { cursorTexture = nil; cursorGammaTexture = nil; return }
         let w = image.width, h = image.height
         var bytes = [UInt8](repeating: 0, count: w * h * 4)
         let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
@@ -184,7 +200,7 @@ final class Renderer {
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: info) else { return }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: w, height: h, mipmapped: true)
-        td.usage = [.shaderRead]
+        td.usage = [.shaderRead, .pixelFormatView]
         guard let tex = device.makeTexture(descriptor: td), let cb = queue.makeCommandBuffer(),
               let blit = cb.makeBlitCommandEncoder() else { return }
         tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: bytes, bytesPerRow: w * 4)
@@ -192,6 +208,7 @@ final class Renderer {
         blit.endEncoding()
         cb.commit()
         cursorTexture = tex
+        cursorGammaTexture = tex.makeTextureView(pixelFormat: .bgra8Unorm)
     }
 
     /// Average / worst GPU time per frame since the last call (ms).
@@ -202,8 +219,8 @@ final class Renderer {
         }
     }
 
-    func forget(index: Int) { mipTextures[index] = nil }
-    func forgetAll() { mipTextures.removeAll() }
+    func forget(index: Int) { mipTextures[index] = nil; mipGamma[index] = nil }
+    func forgetAll() { mipTextures.removeAll(); mipGamma.removeAll() }
 
     /// Frame statistics since the last `takeStats()`.
     struct Stats { var rendered = 0; var skippedBusy = 0 }
@@ -230,12 +247,8 @@ final class Renderer {
         stats.rendered += 1
         cb.label = "XRealDesk frame"
 
-        let full = SIMD2<Float>(Float(drawable.texture.width), Float(drawable.texture.height))
-        let out = SIMD2<Float>(full.x / Float(eyes.count), full.y)   // each eye's share of the output
+        let out = SIMD2<Float>(Float(drawable.texture.width) / Float(eyes.count), Float(drawable.texture.height))
         let ss = min(max(style.supersample, 1), 2)
-        let m = Renderer.margin
-        let eyeSize = out + 2 * m
-        let eyePx = SIMD2<Int>(Int((eyeSize.x * ss).rounded()), Int((eyeSize.y * ss).rounded()))
 
         // 1. Screen textures. A screen drawn at about its own resolution (the usual case) is sampled
         //    straight from the captured frame. Only screens drawn clearly smaller (or at a steep
@@ -243,21 +256,26 @@ final class Renderer {
         //    3200x1800 frame of every screen was the biggest GPU cost while content changed.
         var retained: [DisplayCapture.Frame] = []
         var textures: [Int: MTLTexture] = [:]
+        var gammaTextures: [Int: MTLTexture] = [:]
         let pxPerRadian = eyes[0].intrinsics.focal.x * out.x / eyes[0].intrinsics.calibrated.x * ss
         var fresh: [(Int, DisplayCapture.Frame)] = []
         for p in panels {
             guard let f = p.frame else {
-                if let t = mipTextures[p.index]?.texture { textures[p.index] = t }
+                if let t = mipTextures[p.index]?.texture { textures[p.index] = t; gammaTextures[p.index] = mipGamma[p.index] }
                 continue
             }
-            let drawnWidth = 2 * atan(p.panel.size.x / 2 / layout.distance) * pxPerRadian   // eye pixels
-            if layout.curve >= 0.5, Float(f.texture.width) < drawnWidth * 1.15 {
+            // Direct renderer: drawn at glasses resolution and filtered in the shader up to ~3 texels per
+            // pixel. Two-pass: drawn at the supersampled resolution, mipmaps needed beyond ~1.15.
+            let drawnWidth = 2 * atan(p.panel.size.x / 2 / layout.distance) * pxPerRadian / (style.direct ? ss : 1)
+            if layout.curve >= 0.5, Float(f.texture.width) < drawnWidth * (style.direct ? 2.8 : 1.15) {
                 textures[p.index] = f.texture
+                gammaTextures[p.index] = f.gammaTexture
                 retained.append(f)
             } else if mipTextures[p.index]?.seq != f.seq {
                 fresh.append((p.index, f))
             } else if let t = mipTextures[p.index]?.texture {
                 textures[p.index] = t
+                gammaTextures[p.index] = mipGamma[p.index]
             }
         }
         if !fresh.isEmpty, let blit = cb.makeBlitCommandEncoder() {
@@ -268,8 +286,9 @@ final class Renderer {
                     let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: src.width,
                                                                       height: src.height, mipmapped: true)
                     td.storageMode = .private
-                    td.usage = [.shaderRead]
+                    td.usage = [.shaderRead, .pixelFormatView]
                     dst = device.makeTexture(descriptor: td)
+                    mipGamma[index] = dst?.makeTextureView(pixelFormat: .bgra8Unorm)
                 }
                 guard let dst else { continue }
                 blit.copy(from: src, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(),
@@ -278,12 +297,66 @@ final class Renderer {
                 blit.generateMipmaps(for: dst)
                 mipTextures[index] = (dst, frame.seq)
                 textures[index] = dst
+                gammaTextures[index] = mipGamma[index]
                 retained.append(frame)
             }
             blit.endEncoding()
         }
 
-        // 2. Per eye: panels → supersampled ideal image (with margin), over black (transparent on the optics).
+        let size = SIMD2<Float>(Float(drawable.texture.width), Float(drawable.texture.height))
+        if style.direct {
+            encodeDirect(cb, target: drawable.texture, size: size, eyes: eyes, layout: layout, panels: panels,
+                         textures: gammaTextures, style: style)
+        } else {
+            encodeTwoPass(cb, target: drawable.texture, size: size, eyes: eyes, layout: layout, panels: panels,
+                          textures: textures, style: style)
+        }
+
+        // Optional: the same frame into a readable texture, saved as PNG (diagnostics); with the direct
+        // renderer also the two-pass result of the same frame, for comparison.
+        if let snapshotURL {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: drawable.texture.width,
+                                                              height: drawable.texture.height, mipmapped: false)
+            td.usage = [.renderTarget]
+            td.storageMode = .shared
+            if let snapshot = device.makeTexture(descriptor: td) {
+                if style.direct {
+                    encodeDirect(cb, target: snapshot, size: size, eyes: eyes, layout: layout, panels: panels,
+                                 textures: gammaTextures, style: style)
+                } else {
+                    encodeTwoPass(cb, target: snapshot, size: size, eyes: eyes, layout: layout, panels: panels,
+                                  textures: textures, style: style)
+                }
+                cb.addCompletedHandler { _ in Renderer.writePNG(snapshot, to: snapshotURL) }
+            }
+            if style.direct, let other = device.makeTexture(descriptor: td) {
+                encodeTwoPass(cb, target: other, size: size, eyes: eyes, layout: layout, panels: panels, textures: textures, style: style)
+                let url = snapshotURL.deletingPathExtension().appendingPathExtension("2pass.png")
+                cb.addCompletedHandler { _ in Renderer.writePNG(other, to: url) }
+            }
+        }
+        cb.present(drawable)
+        let sem = inFlight
+        let gpu = gpuLock
+        cb.addCompletedHandler { cb in
+            _ = retained   // keep captured IOSurfaces alive until the GPU copy finished
+            let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000
+            if ms > 0 && ms < 1000 { gpu.withLock { $0.sum += ms; $0.max = max($0.max, ms); $0.n += 1; $0.last = ms } }
+            sem.signal()
+        }
+        cb.commit()
+        return true
+    }
+
+    /// The original renderer: panels → 2x "ideal" image per eye → lens warp + shrink.
+    private func encodeTwoPass(_ cb: MTLCommandBuffer, target: MTLTexture, size: SIMD2<Float>, eyes: [EyeView],
+                               layout: ScreenLayout, panels: [PanelDraw], textures: [Int: MTLTexture], style: Style) {
+        // Per eye: panels → supersampled ideal image (with margin), over black (transparent on the optics).
+        let out = SIMD2<Float>(size.x / Float(eyes.count), size.y)   // each eye's share of the output
+        let ss = min(max(style.supersample, 1), 2)
+        let m = Renderer.margin
+        let eyeSize = out + 2 * m
+        let eyePx = SIMD2<Int>(Int((eyeSize.x * ss).rounded()), Int((eyeSize.y * ss).rounded()))
         var warps: [(eye: MTLTexture, map: MTLTexture?, uniforms: WarpUniforms)] = []
         for (i, e) in eyes.enumerated() {
             if eyeTextures[i] == nil || eyeTextures[i]!.width != eyePx.x || eyeTextures[i]!.height != eyePx.y {
@@ -310,30 +383,68 @@ final class Renderer {
         }
 
         // 3. Ideal images → glasses, each through its lens map, into its part of the output.
-        encodeWarp(cb, target: drawable.texture, warps: warps)
+        encodeWarp(cb, target: target, warps: warps)
 
-        // Optional: the same frame into a readable texture, saved as PNG (diagnostics).
-        if let snapshotURL {
-            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: drawable.texture.width,
-                                                              height: drawable.texture.height, mipmapped: false)
-            td.usage = [.renderTarget]
-            td.storageMode = .shared
-            if let snapshot = device.makeTexture(descriptor: td) {
-                encodeWarp(cb, target: snapshot, warps: warps)
-                cb.addCompletedHandler { _ in Renderer.writePNG(snapshot, to: snapshotURL) }
-            }
+    }
+
+    private struct DirectPanel {
+        var arcCenter: Float, height: Float, width: Float, panelHeight: Float
+        var highlight: Float, dim: Float, hasTexture: Float, hasCursor: Float
+        var cursorRect: SIMD4<Float>
+    }
+
+    private struct DirectUniforms {
+        var invView: simd_float4x4
+        var focal: SIMD2<Float>, center: SIMD2<Float>
+        var toCalibrated: SIMD2<Float>, mapSize: SIMD2<Float>
+        var mapStep: Float, lensOn: Float, originX: Float, radius: Float
+        var distance: Float, cornerRadius: Float, sharpen: Float, quality: Float
+        var panelCount: Float, pad0: Float = 0, pad1: Float = 0, pad2: Float = 0
+    }
+
+    /// Single pass: every glasses pixel → lens map → ray → curved screen wall → one filtered sample.
+    private func encodeDirect(_ cb: MTLCommandBuffer, target: MTLTexture, size: SIMD2<Float>, eyes: [EyeView],
+                              layout: ScreenLayout, panels: [PanelDraw], textures: [Int: MTLTexture], style: Style) {
+        let out = SIMD2<Float>(size.x / Float(eyes.count), size.y)
+        let slots = Array(panels.prefix(8))
+        var gpuPanels = slots.map { p in
+            DirectPanel(arcCenter: p.panel.arcCenter, height: p.panel.height, width: p.panel.size.x, panelHeight: p.panel.size.y,
+                        highlight: p.highlight, dim: p.dim, hasTexture: textures[p.index] == nil ? 0 : 1,
+                        hasCursor: p.cursorRect == nil || cursorGammaTexture == nil ? 0 : 1, cursorRect: p.cursorRect ?? .zero)
         }
-        cb.present(drawable)
-        let sem = inFlight
-        let gpu = gpuLock
-        cb.addCompletedHandler { cb in
-            _ = retained   // keep captured IOSurfaces alive until the GPU copy finished
-            let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000
-            if ms > 0 && ms < 1000 { gpu.withLock { $0.sum += ms; $0.max = max($0.max, ms); $0.n += 1; $0.last = ms } }
-            sem.signal()
+        if gpuPanels.isEmpty { gpuPanels.append(DirectPanel(arcCenter: 0, height: 0, width: 1, panelHeight: 1, highlight: 0, dim: 0,
+                                                            hasTexture: 0, hasCursor: 0, cursorRect: .zero)) }
+        let rp = MTLRenderPassDescriptor()
+        rp.colorAttachments[0].texture = target
+        rp.colorAttachments[0].loadAction = .clear
+        rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        rp.colorAttachments[0].storeAction = .store
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
+        enc.setRenderPipelineState(directPipeline)
+        enc.setFragmentSamplerState(sampler, index: 0)
+        enc.setFragmentSamplerState(linearSampler, index: 1)
+        enc.setFragmentBytes(&gpuPanels, length: MemoryLayout<DirectPanel>.stride * gpuPanels.count, index: 1)
+        enc.setFragmentTexture(cursorGammaTexture ?? dummyTexture, index: 1)
+        for i in 0..<8 {
+            let t = i < slots.count ? textures[slots[i].index] : nil
+            enc.setFragmentTexture(t ?? dummyTexture, index: 2 + i)
         }
-        cb.commit()
-        return true
+        let radius = layout.radius.isFinite ? layout.radius : 0
+        for (i, e) in eyes.enumerated() {
+            let map = mapTextures[min(max(e.map, 0), 2)] ?? mapTextures[0]
+            var u = DirectUniforms(invView: (e.view * simd_float4x4(layout.tiltRotation)).inverse,
+                                   focal: e.intrinsics.focal, center: e.intrinsics.center,
+                                   toCalibrated: e.intrinsics.calibrated / out,
+                                   mapSize: SIMD2(Float(mapInfo.w), Float(mapInfo.h)), mapStep: mapInfo.step,
+                                   lensOn: (style.lensCorrection && map != nil) ? 1 : 0, originX: out.x * Float(i),
+                                   radius: radius, distance: layout.distance, cornerRadius: style.cornerRadius,
+                                   sharpen: style.sharpen, quality: style.supersample, panelCount: Float(slots.count))
+            enc.setViewport(MTLViewport(originX: Double(u.originX), originY: 0, width: Double(out.x), height: Double(out.y), znear: 0, zfar: 1))
+            enc.setFragmentBytes(&u, length: MemoryLayout<DirectUniforms>.stride, index: 0)
+            enc.setFragmentTexture(map ?? dummyTexture, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        }
+        enc.endEncoding()
     }
 
     private func encodeWarp(_ cb: MTLCommandBuffer, target: MTLTexture,
@@ -623,6 +734,157 @@ final class Renderer {
         color = mix(color, float3(0.30, 0.62, 1.0), ring * u.highlight * 0.85);
 
         return float4(color * alpha, alpha);
+    }
+
+    // --- Direct renderer: glasses pixel → lens map → ray → curved screen wall → one filtered sample.
+    struct DPanel { float arcCenter; float height; float width; float panelHeight;
+                    float highlight; float dim; float hasTexture; float hasCursor; float4 cursorRect; };
+    struct DUniforms {
+        float4x4 invView;
+        float2 focal; float2 center;
+        float2 toCalibrated; float2 mapSize;
+        float mapStep; float lensOn; float originX; float radius;
+        float distance; float cornerRadius; float sharpen; float quality;
+        float panelCount; float pad0; float pad1; float pad2;
+    };
+
+    // Eye-local output pixel → point on the layout surface: (arc length, height). false = no hit.
+    bool surfaceAt(float2 px, constant DUniforms& u, texture2d<float> map, sampler lin, thread float2& sy) {
+        float2 pc = px * u.toCalibrated;
+        float2 ideal = pc;
+        if (u.lensOn > 0.5) ideal = map.sample(lin, (pc / u.mapStep + 0.5) / u.mapSize).xy;
+        float3 dcam = float3((ideal.x - u.center.x) / u.focal.x, (u.center.y - ideal.y) / u.focal.y, -1.0);
+        float3 o = (u.invView * float4(0.0, 0.0, 0.0, 1.0)).xyz;
+        float3 d = normalize((u.invView * float4(dcam, 0.0)).xyz);
+        if (u.radius > 0.0) {
+            float c = u.radius - u.distance;          // cylinder axis: x = 0, z = c
+            float oz = o.z - c;
+            float a = d.x * d.x + d.z * d.z;
+            float b = 2.0 * (o.x * d.x + oz * d.z);
+            float cc = o.x * o.x + oz * oz - u.radius * u.radius;
+            float disc = b * b - 4.0 * a * cc;
+            if (disc < 0.0 || a < 1e-8) return false;
+            float t = (-b + sqrt(disc)) / (2.0 * a);
+            if (t <= 0.0) return false;
+            float3 p = o + t * d;
+            sy = float2(atan2(p.x, c - p.z) * u.radius, p.y);
+        } else {
+            if (d.z > -1e-5) return false;
+            float t = (-u.distance - o.z) / d.z;
+            sy = (o + t * d).xy;
+        }
+        return true;
+    }
+
+    float2 panelUV(DPanel p, float2 sy) {
+        return float2((sy.x - p.arcCenter) / p.width + 0.5, 0.5 - (sy.y - p.height) / p.panelHeight);
+    }
+
+    // Catmull-Rom shrink, kernel `scale` texels per unit (1..1.5): 6x6 texels, clamped to the texels
+    // within one unit (no halos).
+    float3 crShrink(texture2d<float> tex, float2 uv, float scale) {
+        float2 size = float2(tex.get_width(), tex.get_height());
+        float2 p = uv * size - 0.5;
+        float2 base = floor(p);
+        float2 f = p - base;
+        float wx[6], wy[6];
+        for (int k = 0; k < 6; k++) { wx[k] = crWeight((float(k - 2) - f.x) / scale); wy[k] = crWeight((float(k - 2) - f.y) / scale); }
+        int2 b = int2(base) - 2, hiIdx = int2(size) - 1;
+        float3 acc = 0.0, lo = 1.0, hi = 0.0;
+        for (int j = 0; j < 6; j++) {
+            int ty = clamp(b.y + j, 0, hiIdx.y);
+            float3 row = 0.0;
+            for (int i = 0; i < 6; i++) {
+                float3 c = tex.read(uint2(clamp(b.x + i, 0, hiIdx.x), ty)).rgb;
+                row += c * wx[i];
+                if (i >= 1 && i <= 4 && j >= 1 && j <= 4 && abs(float(i - 2) - f.x) <= scale && abs(float(j - 2) - f.y) <= scale) {
+                    lo = min(lo, c); hi = max(hi, c);
+                }
+            }
+            acc += row * wy[j];
+        }
+        float sx = 0.0, sy = 0.0;
+        for (int k = 0; k < 6; k++) { sx += wx[k]; sy += wy[k]; }
+        return clamp(acc / max(sx * sy, 1e-4), lo, hi);
+    }
+
+    // One screen sample, filtered for how many texels this pixel covers (gamma-space values).
+    float3 shadeScreen(texture2d<float> tex, sampler smp, float2 uv, float2 duvx, float2 duvy, float sharpen, float quality) {
+        float2 texSize = float2(tex.get_width(), tex.get_height());
+        float footprint = max(length(duvx * texSize), length(duvy * texSize));
+        float3 c;
+        if (quality < 1.25) {
+            c = tex.sample(smp, uv, gradient2d(duvx, duvy)).rgb;
+        } else if (footprint < 1.2) {
+            float3 bc = catmullRom(tex, smp, uv, texSize);
+            float3 bl = tex.sample(smp, uv, level(0)).rgb;
+            c = mix(bc, bl, smoothstep(0.9, 1.2, footprint));
+        } else if (footprint < 3.2) {
+            c = crShrink(tex, uv, clamp(footprint * 0.75, 1.0, 1.5));
+        } else {
+            c = tex.sample(smp, uv, gradient2d(duvx, duvy)).rgb;
+        }
+        if (sharpen > 0.001 && footprint < 3.2) {
+            float3 n = tex.sample(smp, uv + duvy, level(0)).rgb;
+            float3 so = tex.sample(smp, uv - duvy, level(0)).rgb;
+            float3 e = tex.sample(smp, uv + duvx, level(0)).rgb;
+            float3 w = tex.sample(smp, uv - duvx, level(0)).rgb;
+            float3 blur = (n + so + e + w) * 0.25;
+            float3 mn = min(c, min(min(n, so), min(e, w)));
+            float3 mx = max(c, max(max(n, so), max(e, w)));
+            c = clamp(c + (c - blur) * (sharpen * 1.6), mn, mx);
+        }
+        return c;
+    }
+
+    float3 toLinear(float3 c) { return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045); }
+
+    fragment float4 directFragment(WOut in [[stage_in]], constant DUniforms& u [[buffer(0)]], constant DPanel* panels [[buffer(1)]],
+                                   texture2d<float> map [[texture(0)]], texture2d<float> cursor [[texture(1)]],
+                                   array<texture2d<float>, 8> screens [[texture(2)]],
+                                   sampler smp [[sampler(0)]], sampler lin [[sampler(1)]]) {
+        float2 px = in.position.xy - float2(u.originX, 0.0);
+        float2 sy, syx, syy;
+        if (!surfaceAt(px, u, map, lin, sy)) return float4(0.0, 0.0, 0.0, 1.0);
+        bool hx = surfaceAt(px + float2(1.0, 0.0), u, map, lin, syx);
+        bool hy = surfaceAt(px + float2(0.0, 1.0), u, map, lin, syy);
+        int n = min(int(u.panelCount), 8);
+        for (int i = 0; i < n; i++) {
+            DPanel p = panels[i];
+            float2 uv = panelUV(p, sy);
+            if (uv.x < -0.02 || uv.y < -0.02 || uv.x > 1.02 || uv.y > 1.02) continue;
+            float2 duvx = hx ? panelUV(p, syx) - uv : float2(0.0);
+            float2 duvy = hy ? panelUV(p, syy) - uv : float2(0.0);
+            // Rounded-rectangle mask in panel units (height = 1), antialiased over one pixel.
+            float2 size = float2(p.width / p.panelHeight, 1.0);
+            float2 q = abs((uv - 0.5) * size) - (size * 0.5 - u.cornerRadius);
+            float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - u.cornerRadius;
+            float aa = max(max(length(duvx * size), length(duvy * size)), 1e-5);
+            float alpha = 1.0 - smoothstep(-0.5 * aa, 0.5 * aa, dist);
+            if (alpha <= 0.0) continue;
+            float3 color;
+            if (p.hasTexture > 0.5) {
+                color = shadeScreen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, u.sharpen, u.quality);
+            } else {
+                float2 g = abs(fract(uv * float2(16.0, 9.0)) - 0.5);
+                float line = 1.0 - smoothstep(0.46, 0.5, max(g.x, g.y));
+                color = mix(float3(0.35, 0.36, 0.40), float3(0.25, 0.26, 0.28), line);
+            }
+            if (p.hasCursor > 0.5) {
+                float2 rs = p.cursorRect.zw - p.cursorRect.xy;
+                float2 cuv = (uv - p.cursorRect.xy) / rs;
+                if (all(cuv >= 0.0) && all(cuv <= 1.0)) {
+                    float4 cc = cursor.sample(smp, cuv, gradient2d(duvx / rs, duvy / rs));   // premultiplied
+                    color = cc.rgb + color * (1.0 - cc.a);
+                }
+            }
+            color *= (1.0 - p.dim);
+            // Accent ring on the screen that has the cursor (~1.5 px).
+            float ring = smoothstep(-2.5 * aa, -1.5 * aa, dist);
+            color = mix(color, float3(0.58, 0.72, 1.0), ring * p.highlight * 0.85);
+            return float4(toLinear(color) * alpha, 1.0);
+        }
+        return float4(0.0, 0.0, 0.0, 1.0);
     }
     """
 }

@@ -52,6 +52,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         var fps: Double = 0
         /// The display link is pacing wrong; the main thread should restart it.
         var needsResync = false
+        var sideBySide = false
     }
 
     private let renderer: Renderer
@@ -222,6 +223,11 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
     private let frameMutex = NSLock()
 
     func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
+        frame(presentAt: update.targetPresentationTimestamp, deadline: update.targetTimestamp, drawable: { update.drawable })
+    }
+
+    /// One frame. `presentAt`: when it reaches the glasses; `deadline`: when rendering must be done.
+    private func frame(presentAt: CFTimeInterval, deadline: CFTimeInterval, drawable: () -> CAMetalDrawable?) {
         frameMutex.lock()
         defer { frameMutex.unlock() }
         let cfg = configLock.withLock { $0 }
@@ -231,7 +237,6 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         let layout = cfg.layout
 
         // Head pose, predicted to when this frame reaches the glasses.
-        let presentAt = update.targetPresentationTimestamp
         if lastTarget > 0 {
             let gap = presentAt - lastTarget
             let nominal = 1.0 / Double(targetFPS)
@@ -242,7 +247,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
                 if hitchReports < 8 {
                     hitchReports += 1
                     Log.info(String(format: "Hitch: skipped %.0f frame(s); callback %.1f ms after the previous one, arrived with %.1f ms to its deadline; previous frame: CPU %.2f ms, GPU wait %.2f ms, GPU %.2f ms",
-                                    gap / nominal - 1, (now - lastCallbackAt) * 1000, (update.targetTimestamp - now) * 1000,
+                                    gap / nominal - 1, (now - lastCallbackAt) * 1000, (deadline - now) * 1000,
                                     lastCallbackCPUMs, renderer.lastWaitMs, renderer.lastGPUMs))
                 }
             }
@@ -254,7 +259,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         // attached while the glasses were still switching from mirroring to extended.
         let nominal = 1.0 / Double(targetFPS)
         pacingCallbacks += 1
-        if lastCallbackAt > 0, now - lastCallbackAt > nominal * 1.7, update.targetTimestamp - now > nominal * 0.6 {
+        if lastCallbackAt > 0, now - lastCallbackAt > nominal * 1.7, deadline - now > nominal * 0.6 {
             pacingSlow += 1
         }
         if now - pacingWindowStart >= 0.5 {
@@ -271,7 +276,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         // and a 60 Hz frame stays up twice as long.
         let target = presentAt + cfg.predictionSeconds + max(0, 0.5 / Double(targetFPS) - 0.5 / 120)
         horizonSum += target - now; horizonN += 1
-        presentSum += presentAt - now; deadlineSum += update.targetTimestamp - now
+        presentSum += presentAt - now; deadlineSum += deadline - now
         var head = lastHead
         var tracking = false
         var headSpeed: Float = 0
@@ -381,7 +386,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         }
         // Side-by-side 3D (the glasses' button switches the display to 3840x1080): by default the same
         // flat picture in both halves; with depth on (`set depth=1`), one view per eye.
-        let size = update.drawable.texture
+        let size = layer.drawableSize
         let stereo = !cfg.preview && cal.eyes.count == 2 && size.width * 10 > size.height * 25
         let eyes: [Renderer.EyeView]
         if stereo && cfg.flat3D {
@@ -452,7 +457,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         let viewMoved = lastDrawnView.map { SpatialMath.degrees(($0.inverse * viewRot).angle) > 0.002 } ?? true
         if !viewMoved, key == lastDrawnKey, pendingSnapshot == nil {
             unchangedFrames += 1
-        } else if renderer.render(drawable: update.drawable, eyes: eyes,
+        } else if let target = drawable(), renderer.render(drawable: target, eyes: eyes,
                                   layout: layout, panels: draws, style: cfg.style, snapshotTo: pendingSnapshot) {
             pendingSnapshot = nil
             lastDrawnView = viewRot
@@ -512,6 +517,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         out.gaze = gaze
         out.viewYawPitch = SIMD2(vy, vp)
         out.tracking = tracking
+        out.sideBySide = lastStereo
         if let fps { out.fps = fps }
         let published = out
         outputLock.withLock { $0 = published }
