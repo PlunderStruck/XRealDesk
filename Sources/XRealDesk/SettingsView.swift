@@ -74,6 +74,19 @@ struct SettingsView: View {
                         Text("60 Hz").tag(60)
                         Text("120 Hz").tag(120)
                     }
+                    Picker("Glasses screens sit", selection: $settings.placement) {
+                        ForEach(ScreenPlacement.allCases) { Text($0.title).tag($0) }
+                    }
+                    Text(settings.placement == .custom
+                         ? "Arrange the XRealDesk screens in System Settings → Displays, then save. XRealDesk keeps them there, even if macOS reshuffles displays."
+                         : "Which edge of your laptop screen the mouse crosses to reach the glasses. XRealDesk keeps it in place automatically. Rearranging them yourself in System Settings → Displays switches to Custom and keeps your layout.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if settings.placement == .custom {
+                        HStack {
+                            Button("Open Displays Settings…") { app.openDisplaySettings() }
+                            Button("Save current arrangement") { app.saveCurrentArrangement() }
+                        }
+                    }
                     Toggle("Make the middle glasses screen the main display", isOn: $settings.glassesIsMain)
                     Text("The main display gets the Dock and new windows. Windows move back when XRealDesk quits.")
                         .font(.caption).foregroundStyle(.secondary)

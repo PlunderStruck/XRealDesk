@@ -394,15 +394,18 @@ final class AppController: ObservableObject {
         let ids = virtualDisplays.screens.map(\.id)
         guard !ids.isEmpty, ids.allSatisfy({ CGDisplayIsOnline($0) != 0 }) else { return }
         let glassesWidth = glasses.map { Int(CGDisplayBounds($0).width) } ?? 0
-        let key = "\(ids)-\(glasses ?? 0)-\(glassesWidth)-\(settings.rows)-\(settings.glassesIsMain)"
+        let custom = settings.customOffsets.sorted { $0.key < $1.key }.map { "\($0.key):\(Int($0.value.x)),\(Int($0.value.y))" }.joined(separator: ";")
+        let key = "\(ids)-\(glasses ?? 0)-\(glassesWidth)-\(settings.rows)-\(settings.glassesIsMain)-\(settings.placement.rawValue)-\(custom)"
         guard arrangedKey != key, arrangeAttempts < 6 else { return }
         arrangeAttempts += 1
         let origins = DisplayConfigurator.plannedOrigins(
             virtualIDs: ids, count: ids.count, rows: settings.rows,
             pointSize: virtualDisplays.screens[0].pointSize, glasses: glasses,
-            mainIndex: settings.glassesIsMain ? centerPanelIndex() : nil)
+            mainIndex: settings.glassesIsMain ? centerPanelIndex() : nil,
+            placement: settings.placement, customOffsets: settings.customOffsets)
         DisplayConfigurator.arrange(origins)
         arrangedKey = key
+        lastPlannedOrigins = origins
         // WindowServer places newly attached displays asynchronously and can override us; verify and retry.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self, self.arrangedKey == key else { return }
@@ -756,6 +759,62 @@ final class AppController: ObservableObject {
         }
     }
 
+    /// Custom arrangement: remember where the glasses screens are right now (as arranged in
+    /// System Settings → Displays) and keep them there from now on.
+    func saveCurrentArrangement() {
+        let home = CGDisplayBounds(DisplayConfigurator.homeDisplay(excluding: glassesDisplayID))
+        var offsets: [Int: CGPoint] = [:]
+        for s in virtualDisplays.screens {
+            let b = CGDisplayBounds(s.id)
+            offsets[s.index] = CGPoint(x: b.minX - home.minX, y: b.minY - home.minY)
+        }
+        settings.customOffsets = offsets
+        settings.placement = .custom
+        Log.info("Saved custom screen arrangement: \(offsets)")
+        hud("Arrangement saved")
+    }
+
+    func openDisplaySettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension")!)
+    }
+
+    /// The arrangement we last applied, to notice when macOS rearranges screens on its own later.
+    private var lastPlannedOrigins: [CGDirectDisplayID: CGPoint] = [:]
+    private var arrangementRepairs: [Date] = []
+    private var userRearranged = false
+
+    /// macOS sometimes re-shuffles displays after the fact (e.g. after a display change). Put the
+    /// glasses screens back where they belong so the mouse moves between them and the laptop as laid
+    /// out. Limited to 3 repairs a minute so we never fight macOS in a loop.
+    private func checkArrangement() {
+        let ids = virtualDisplays.screens.map(\.id)
+        guard !ids.isEmpty, !lastPlannedOrigins.isEmpty, arrangedKey != nil, displaysStableFor > 3,
+              ids.allSatisfy({ CGDisplayIsOnline($0) != 0 }) else { return }
+        let arrangingInSystemSettings = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.systempreferences"
+        if DisplayConfigurator.virtualArrangementMatches(lastPlannedOrigins, virtualIDs: ids, glasses: glassesDisplayID) {
+            userRearranged = false
+            return
+        }
+        // You're dragging screens around in System Settings → Displays: leave them alone, and when
+        // you're done, keep your layout (Custom) instead of snapping it back.
+        if arrangingInSystemSettings { userRearranged = true; return }
+        if userRearranged {
+            userRearranged = false
+            saveCurrentArrangement()
+            hud("Kept your screen arrangement")
+            return
+        }
+        let now = Date()
+        arrangementRepairs = arrangementRepairs.filter { now.timeIntervalSince($0) < 60 }
+        guard arrangementRepairs.count < 3 else { return }
+        arrangementRepairs.append(now)
+        let actual = ids.map { "\($0)@\(CGDisplayBounds($0).origin)" }.joined(separator: " ")
+        Log.info("macOS moved the glasses screens (\(actual)); putting them back")
+        arrangedKey = nil
+        arrangeAttempts = 0
+        arrangeIfNeeded(glasses: glassesDisplayID)
+    }
+
     /// When the display setup last changed (screens appeared/disappeared/moved).
     private var lastDisplayChange = Date()
     private var displaysStableFor: TimeInterval { Date().timeIntervalSince(lastDisplayChange) }
@@ -830,6 +889,8 @@ final class AppController: ObservableObject {
                 slowSeconds = 0
             }
         }
+
+        if tickCount % 120 == 0 { checkArrangement() }   // every 2 s
 
         tickCount += 1
         let screensUp = !virtualDisplays.screens.isEmpty && glassesDisplayID != nil || preview

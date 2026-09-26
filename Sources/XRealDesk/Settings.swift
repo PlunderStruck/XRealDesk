@@ -1,6 +1,23 @@
 import Foundation
+import CoreGraphics
 import Combine
 import XRCore
+
+/// Where the glasses screens sit relative to the laptop screen in macOS's display arrangement,
+/// i.e. which edge of the laptop screen the mouse crosses to reach them.
+enum ScreenPlacement: String, CaseIterable, Identifiable {
+    case above, below, left, right, custom
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .above: return "Above laptop"
+        case .below: return "Below laptop"
+        case .left: return "Left of laptop"
+        case .right: return "Right of laptop"
+        case .custom: return "Custom"
+        }
+    }
+}
 
 enum TrackingMode: String, CaseIterable, Identifiable {
     /// Screens stay fixed in space; turn your head to look between them.
@@ -104,6 +121,14 @@ final class Settings: ObservableObject {
     @Published var hiDPI: Bool { didSet { d.set(hiDPI, forKey: "hiDPI") } }
     @Published var refreshRate: Int { didSet { d.set(refreshRate, forKey: "refreshRate") } }
     @Published var glassesIsMain: Bool { didSet { d.set(glassesIsMain, forKey: "glassesIsMain") } }
+    @Published var placement: ScreenPlacement { didSet { d.set(placement.rawValue, forKey: "placement") } }
+    /// Custom arrangement: each glasses screen's offset from the laptop screen's top-left (points).
+    @Published var customOffsets: [Int: CGPoint] {
+        didSet {
+            d.set(Dictionary(uniqueKeysWithValues: customOffsets.map { ("\($0.key)", [Double($0.value.x), Double($0.value.y)]) }),
+                  forKey: "customOffsets")
+        }
+    }
 
     // Layout
     /// Angular width of each screen in degrees (the Air 2 Pro shows ~39° × 22°).
@@ -177,6 +202,12 @@ final class Settings: ObservableObject {
         hiDPI = d.bool(forKey: "hiDPI")
         refreshRate = d.integer(forKey: "refreshRate") == 120 ? 120 : 60
         glassesIsMain = d.bool(forKey: "glassesIsMain")
+        placement = ScreenPlacement(rawValue: d.string(forKey: "placement") ?? "") ?? .above
+        var offsets: [Int: CGPoint] = [:]
+        for (k, v) in (d.dictionary(forKey: "customOffsets") as? [String: [Double]]) ?? [:] where v.count == 2 {
+            if let i = Int(k) { offsets[i] = CGPoint(x: v[0], y: v[1]) }
+        }
+        customOffsets = offsets
         screenWidthDegrees = d.double(forKey: "screenWidthDegrees")
         gapDegrees = d.double(forKey: "gapDegrees")
         curve = d.double(forKey: "curve")

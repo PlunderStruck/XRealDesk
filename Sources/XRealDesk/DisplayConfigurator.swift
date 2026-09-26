@@ -87,25 +87,45 @@ enum DisplayConfigurator {
     /// If `mainIndex` is set, everything is shifted so that virtual screen becomes the main display
     /// (macOS makes whichever display sits at 0,0 the main one: menu bar, Dock, new windows).
     static func plannedOrigins(virtualIDs: [CGDirectDisplayID], count: Int, rows: Int, pointSize: CGSize,
-                               glasses: CGDirectDisplayID?, mainIndex: Int?) -> [CGDirectDisplayID: CGPoint] {
+                               glasses: CGDirectDisplayID?, mainIndex: Int?,
+                               placement: ScreenPlacement = .above,
+                               customOffsets: [Int: CGPoint] = [:]) -> [CGDirectDisplayID: CGPoint] {
         let homeID = homeDisplay(excluding: glasses)
         let home = CGDisplayBounds(homeID)
         var out: [CGDirectDisplayID: CGPoint] = [:]
         let physical = onlineDisplays().filter { !VirtualDisplayManager.isVirtual($0) && $0 != glasses }
         for id in physical { out[id] = CGDisplayBounds(id).origin }
 
+        // Glasses screens as a grid, same layout you see in the glasses (row 0 = bottom row),
+        // placed against the chosen side of the laptop so the mouse moves across naturally.
         let cells = ScreenLayout.grid(count: count, rows: rows)
         let w = pointSize.width, h = pointSize.height
+        let rowCount = (cells.map(\.row).max() ?? 0) + 1
+        let maxCols = cells.map(\.colsInRow).max() ?? 1
+        let gridH = CGFloat(rowCount) * h
         for (i, id) in virtualIDs.enumerated() where i < cells.count {
             let c = cells[i]
             let rowWidth = CGFloat(c.colsInRow) * w
-            let x = home.midX - rowWidth / 2 + CGFloat(c.col) * w
-            let y = home.minY - CGFloat(c.row + 1) * h
-            out[id] = CGPoint(x: x.rounded(), y: y.rounded())
+            let fromTop = CGFloat(rowCount - 1 - c.row)   // visual row index counted from the top
+            var p: CGPoint
+            switch placement {
+            case .above, .custom:
+                p = CGPoint(x: home.midX - rowWidth / 2 + CGFloat(c.col) * w, y: home.minY - gridH + fromTop * h)
+            case .below:
+                p = CGPoint(x: home.midX - rowWidth / 2 + CGFloat(c.col) * w, y: home.maxY + fromTop * h)
+            case .left:
+                p = CGPoint(x: home.minX - CGFloat(maxCols) * w + CGFloat(c.col) * w, y: home.midY - gridH / 2 + fromTop * h)
+            case .right:
+                p = CGPoint(x: home.maxX + CGFloat(c.col) * w, y: home.midY - gridH / 2 + fromTop * h)
+            }
+            if placement == .custom, let o = customOffsets[i] {
+                p = CGPoint(x: home.minX + o.x, y: home.minY + o.y)   // your own arrangement
+            }
+            out[id] = CGPoint(x: p.x.rounded(), y: p.y.rounded())
         }
         if let glasses {
-            // Park the glasses' physical display out of the way; the cursor guard keeps the mouse off it.
-            let minX = physical.map { CGDisplayBounds($0).minX }.min() ?? home.minX
+            // Park the glasses' own display beyond everything else; the cursor guard keeps the mouse off it.
+            let minX = out.values.map(\.x).min() ?? home.minX
             let gb = CGDisplayBounds(glasses)
             out[glasses] = CGPoint(x: minX - gb.width, y: home.maxY - gb.height)
         }

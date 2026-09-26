@@ -30,6 +30,9 @@ If you missed the prompt: System Settings → Privacy & Security → Screen & Sy
    Your laptop keeps its own resolution.
 3. The virtual screens sit **above** your laptop screen in macOS's arrangement, left to right in the same
    order you see them in the glasses. Move the mouse up off the top of the laptop screen to reach them, or drag windows up.
+   You can pick another side in Settings → Screens → *Glasses screens sit* (above, below, left, right),
+   or just drag them where you like in System Settings → Displays: XRealDesk switches to *Custom* and keeps
+   your layout. Either way it puts the screens back if macOS reshuffles displays.
 4. Look around. The screens stay where they are. Press **⌃⌥R** to recenter them in front of you.
 
 **Mirroring vs. extended:** while XRealDesk runs, the glasses must be an *extended* display, since that's the only way it can draw your screens on them, and it switches them automatically. When XRealDesk isn't running they should *mirror* your main screen (their normal behavior). XRealDesk sets them back to mirroring when it quits. If you ever see an empty desktop in the glasses, XRealDesk isn't drawing: reopen it, or replug the glasses.
