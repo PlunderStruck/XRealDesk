@@ -104,6 +104,13 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
     private var lastCallbackAt: CFTimeInterval = 0
     private var lastCallbackCPUMs = 0.0
     private var hitchReports = 0
+    private var lastDrawnView: simd_quatf?
+    private var lastDrawnKey: [Double] = []
+    private var unchangedFrames = 0
+    private var shownSeq: [Int: UInt64] = [:]
+    private var unshownCaptures: [Int: Int] = [:]
+    private var captureToGlassesSum: [Int: Double] = [:]
+    private var captureShown: [Int: Int] = [:]
     private var pacingWindowStart: CFTimeInterval = 0, pacingCallbacks = 0, pacingSlow = 0
     /// Neck pivot → midpoint between the eyes, head frame (m): the usual neck model (eyes ~7.5 cm
     /// above and ~8 cm in front of the pivot the head turns about).
@@ -133,7 +140,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
 
     // MARK: Main-thread API
 
-    func update(_ config: Config) { configLock.withLock { $0 = config } }
+    func update(_ config: Config) { configLock.withLock { $0 = config }; configVersion.withLock { $0 += 1 } }
+    private let configVersion = OSAllocatedUnfairLock(initialState: 0)
     func send(_ command: Command) { commandLock.withLock { $0.append(command) } }
     func setCaptures(_ captures: [Int: DisplayCapture]) { capturesLock.withLock { $0 = captures } }
     func setCursorScreen(_ index: Int?) { cursorLock.withLock { $0 = index } }
@@ -431,9 +439,32 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
                                       highlight: ring, dim: 1 - (1 - baseDim) * (1 - d),
                                       cursorRect: p.index == cursorPanel ? cursorRect : nil)
         }
-        if renderer.render(drawable: update.drawable, eyes: eyes,
-                           layout: layout, panels: draws, style: cfg.style, snapshotTo: pendingSnapshot) {
+        // Nothing changed since the last drawn frame (head within a tenth of a pixel, same screen
+        // contents, cursor, fades and settings)? Then the glasses already show this frame: skip it.
+        // Typing with a steady head costs no GPU time at all, which leaves the GPU free for the
+        // frames that do change.
+        var key: [Double] = [Double(configVersion.withLock { $0 }), Double(eyes.count), Double(layer.drawableSize.width),
+                             Double(cursorState.seq), cursorState.visible ? 1 : 0]
+        for d in draws {
+            key += [Double(d.index), Double(d.frame?.seq ?? 0), Double(d.highlight), (Double(d.dim) * 2048).rounded()]
+            if let r = d.cursorRect { key += [Double(r.x), Double(r.y), Double(r.z), Double(r.w)] }
+        }
+        let viewMoved = lastDrawnView.map { SpatialMath.degrees(($0.inverse * viewRot).angle) > 0.002 } ?? true
+        if !viewMoved, key == lastDrawnKey, pendingSnapshot == nil {
+            unchangedFrames += 1
+        } else if renderer.render(drawable: update.drawable, eyes: eyes,
+                                  layout: layout, panels: draws, style: cfg.style, snapshotTo: pendingSnapshot) {
             pendingSnapshot = nil
+            lastDrawnView = viewRot
+            lastDrawnKey = key
+            // Capture → glasses latency for screens showing a new frame.
+            for d in draws {
+                guard let f = d.frame, f.seq != shownSeq[d.index] else { continue }
+                if let prev = shownSeq[d.index], f.seq > prev + 1 { unshownCaptures[d.index, default: 0] += Int(f.seq - prev - 1) }
+                shownSeq[d.index] = f.seq
+                captureToGlassesSum[d.index, default: 0] += presentAt - f.arrival
+                captureShown[d.index, default: 0] += 1
+            }
         }
 
         // Publish for the UI / cursor controller.
@@ -455,6 +486,17 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
                                 hid.sampleRate, horizonSum / Double(max(horizonN, 1)) * 1000,
                                 presentSum / Double(max(horizonN, 1)) * 1000, deadlineSum / Double(max(horizonN, 1)) * 1000))
                 horizonSum = 0; horizonN = 0; presentSum = 0; deadlineSum = 0
+                var capture: [String] = []
+                for (i, c) in capturesLock.withLock({ $0 }).sorted(by: { $0.key < $1.key }) {
+                    let s = c.takeStats()
+                    let shown = captureShown[i] ?? 0
+                    capture.append(String(format: "screen %d: %.0f new frames/s (%.1f ms old on arrival, max %.1f; longest gap %.0f ms), %d shown (%.1f ms arrival→glasses), %d never shown",
+                                          i + 1, Double(s.frames) / 10, s.latencySum / Double(max(s.frames, 1)) * 1000, s.latencyMax * 1000,
+                                          s.gapMax * 1000, shown, (captureToGlassesSum[i] ?? 0) / Double(max(shown, 1)) * 1000,
+                                          unshownCaptures[i] ?? 0))
+                }
+                Log.info("Capture: " + capture.joined(separator: "; ") + String(format: "; %d unchanged frames skipped", unchangedFrames))
+                captureShown = [:]; captureToGlassesSum = [:]; unshownCaptures = [:]; unchangedFrames = 0
                 jitterSum = 0; jitterN = 0; jitterMax = 0
                 if quietN > 120 {
                     let rawRMS = sqrt(quietRawSum / Double(quietN)), stabRMS = sqrt(quietStabSum / Double(quietN))

@@ -12,11 +12,13 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     final class Frame: @unchecked Sendable {
         let texture: MTLTexture
         let seq: UInt64
+        /// When the frame reached us (CACurrentMediaTime).
+        let arrival: CFTimeInterval
         // Keep the CoreVideo objects alive for as long as the texture is used.
         private let cvTexture: CVMetalTexture
         private let pixelBuffer: CVPixelBuffer
-        init(texture: MTLTexture, cvTexture: CVMetalTexture, pixelBuffer: CVPixelBuffer, seq: UInt64) {
-            self.texture = texture; self.cvTexture = cvTexture; self.pixelBuffer = pixelBuffer; self.seq = seq
+        init(texture: MTLTexture, cvTexture: CVMetalTexture, pixelBuffer: CVPixelBuffer, seq: UInt64, arrival: CFTimeInterval) {
+            self.texture = texture; self.cvTexture = cvTexture; self.pixelBuffer = pixelBuffer; self.seq = seq; self.arrival = arrival
         }
     }
 
@@ -47,6 +49,13 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     var latestFrame: Frame? { frameLock.withLock { $0 } }
+
+    /// Capture diagnostics: new frames, how old they were on arrival (since macOS composed them),
+    /// and the largest gap between frames.
+    struct Stats { var frames = 0; var latencySum = 0.0; var latencyMax = 0.0; var gapMax = 0.0 }
+    private let statsLock = OSAllocatedUnfairLock(initialState: Stats())
+    private var lastArrival: CFTimeInterval = 0   // sample-handler queue only
+    func takeStats() -> Stats { statsLock.withLock { s in defer { s = Stats() }; return s } }
     var status: Status { statusLock.withLock { $0 } }
 
     init(displayID: CGDirectDisplayID, index: Int, device: MTLDevice, refreshRate: Int) {
@@ -172,13 +181,27 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
            let status = SCFrameStatus(rawValue: raw), status != .complete {
             return
         }
+        let arrival = CACurrentMediaTime()
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer), let cache = textureCache else { return }
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        let displayTime = ((CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?
+            .first?[.displayTime] as? UInt64).map { Double($0) * Double(tb.numer) / Double(tb.denom) / 1e9 }
+        let gap = lastArrival > 0 ? arrival - lastArrival : 0
+        lastArrival = arrival
+        statsLock.withLock { s in
+            s.frames += 1
+            if let displayTime, arrival - displayTime < 1 {
+                s.latencySum += arrival - displayTime; s.latencyMax = max(s.latencyMax, arrival - displayTime)
+            }
+            if gap < 0.5 { s.gapMax = max(s.gapMax, gap) }
+        }
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         var cvTex: CVMetalTexture?
         let r = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, pb, nil, .bgra8Unorm_srgb, w, h, 0, &cvTex)
         guard r == kCVReturnSuccess, let cvTex, let tex = CVMetalTextureGetTexture(cvTex) else { return }
         seq &+= 1
-        let frame = Frame(texture: tex, cvTexture: cvTex, pixelBuffer: pb, seq: seq)
+        let frame = Frame(texture: tex, cvTexture: cvTex, pixelBuffer: pb, seq: seq, arrival: arrival)
         frameLock.withLock { $0 = frame }
     }
 }
