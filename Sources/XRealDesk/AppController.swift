@@ -110,6 +110,7 @@ final class AppController: ObservableObject {
         lastHotkeys = settings.hotkeysEnabled
 
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.lastDisplayChange = Date()
             self?.scheduleReconcile(after: 0.4)
         }
         let ws = NSWorkspace.shared.notificationCenter
@@ -138,7 +139,7 @@ final class AppController: ObservableObject {
             self.windows.debugPlace(pid: app.processIdentifier, windowID: wid, rect: onGlasses) { placed in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     self.windows.suspended = false
-                    self.windows.snapshot(screens: self.virtualScreenList)
+                    self.windows.snapshot(screens: self.virtualScreenList, displaysStableFor: self.displaysStableFor)
                     let remembered = self.windows.entries[wid] != nil
                     self.windows.suspended = true
                     let home = CGDisplayBounds(DisplayConfigurator.homeDisplay(excluding: self.glassesDisplayID))
@@ -482,7 +483,7 @@ final class AppController: ObservableObject {
     /// exist, then pause recording until they're restored.
     private func rememberWindows() {
         guard settings.windowMemory, !virtualDisplays.screens.isEmpty else { return }
-        windows.snapshot(screens: virtualScreenList)
+        windows.snapshot(screens: virtualScreenList, displaysStableFor: 0)   // never forget on the way out
         windows.save()
         windows.suspended = true
     }
@@ -755,6 +756,10 @@ final class AppController: ObservableObject {
         }
     }
 
+    /// When the display setup last changed (screens appeared/disappeared/moved).
+    private var lastDisplayChange = Date()
+    private var displaysStableFor: TimeInterval { Date().timeIntervalSince(lastDisplayChange) }
+
     private func startUITimer() {
         guard uiTimer == nil else { return }
         let t = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
@@ -830,7 +835,7 @@ final class AppController: ObservableObject {
         let screensUp = !virtualDisplays.screens.isEmpty && glassesDisplayID != nil || preview
         if screensUp, tickCount % 15 == 0 { windows.noteFocus(screens: screens) }             // 4×/s
         if screensUp, settings.windowMemory, tickCount % 90 == 0 {                              // every 1.5 s
-            windows.snapshot(screens: screens)
+            windows.snapshot(screens: screens, displaysStableFor: displaysStableFor)
             if tickCount % 1800 == 0 { windows.save() }                                         // every 30 s
         }
         if tickCount % 60 == 0 {

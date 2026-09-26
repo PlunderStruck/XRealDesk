@@ -83,9 +83,18 @@ final class WindowKeeper {
 
     // MARK: 1. Memory
 
-    /// Record where windows are. Call periodically while the glasses screens are up and settled.
-    func snapshot(screens: [(index: Int, id: CGDirectDisplayID)]) {
+    /// Windows seen on the glasses in the previous snapshot, and when that was.
+    private var onGlassesLastSnapshot = Set<UInt32>()
+    private var lastSnapshotTime = Date.distantPast
+
+    /// Record where windows are. Call periodically while the glasses screens are up.
+    /// - Parameter displaysStableFor: seconds since the last display change. A window only counts
+    ///   as "you moved it off the glasses" (and is forgotten) when displays have been stable, so
+    ///   windows macOS shuffled around during a display change are remembered and put back.
+    func snapshot(screens: [(index: Int, id: CGDirectDisplayID)], displaysStableFor: TimeInterval) {
         guard !suspended, !screens.isEmpty else { return }
+        let now = Date()
+        let continuous = now.timeIntervalSince(lastSnapshotTime) < 5
         let live = liveWindows(onScreenOnly: false)
         let liveIDs = Set(live.map(\.id))
         let presentScreens = Set(screens.map(\.index))
@@ -100,15 +109,19 @@ final class WindowKeeper {
                                   rw: w.bounds.width / sb.width, rh: w.bounds.height / sb.height, updated: Date())
             seen.insert(w.id)
         }
-        // Forget windows that were closed, or that you moved off the glasses yourself (their
-        // screen is still here, so that was deliberate). Keep ones whose screen went away.
+        // Forget windows that were closed, or that you dragged off the glasses yourself: it was on
+        // the glasses a moment ago, its screen is still there, and no display change happened.
+        // Anything else (screens recreated, display glitches) is macOS moving it, so remember it.
         for (id, e) in entries where !seen.contains(id) {
             if !liveIDs.contains(id) {
                 if NSRunningApplication(processIdentifier: e.pid) != nil { entries[id] = nil }   // closed
-            } else if presentScreens.contains(e.screen) {
+            } else if presentScreens.contains(e.screen), continuous, onGlassesLastSnapshot.contains(id),
+                      displaysStableFor > 5 {
                 entries[id] = nil   // moved off by the user
             }
         }
+        onGlassesLastSnapshot = seen
+        lastSnapshotTime = now
         // Old entries from apps that quit long ago.
         let cutoff = Date().addingTimeInterval(-7 * 24 * 3600)
         entries = entries.filter { $0.value.updated > cutoff }
