@@ -64,7 +64,8 @@ public enum XRealProtocol {
         case readDPFirmware = 0x16
         case readDSPFirmware = 0x21
         case readMCUFirmware = 0x26
-        case eventDisplayToggled = 0x6C04
+        /// Wear sensor: data[0] = 1 when the glasses are put on, 0 a few seconds after they come off.
+        case eventWorn = 0x6C04
         case eventButtonPressed = 0x6C05
     }
 

@@ -50,6 +50,7 @@ final class AppController: ObservableObject {
     private var window: GlassesWindow?
     /// Side-by-side 3D with real depth (experimental; the flat picture felt better on the Air 2 Pro).
     private var stereoDepth = false
+    private var sharpDownsample = true
     private var renderer: Renderer?
     private let cursor = CursorController()
     private let windows = WindowKeeper()
@@ -99,6 +100,7 @@ final class AppController: ObservableObject {
         hid.onStateChange = { [weak self] state in self?.glassesStateChanged(state) }
         hid.onDeviceInfo = { [weak self] info in self?.deviceInfo = info }
         hid.onButton = { phys, virt, value in Log.info("Glasses button phys=\(phys) virt=\(virt) value=\(value)") }
+        hid.onWornChange = { [weak self] worn in self?.wornChanged(worn) }
         hid.start()
 
         if let device = MTLCreateSystemDefaultDevice() {
@@ -185,6 +187,9 @@ final class AppController: ObservableObject {
             case "height": if let x = Double(v) { self.settings.tiltDegrees = x }
             case "mode": if let m = TrackingMode(rawValue: v) { self.setMode(m) }
             case "lens": self.settings.lensCorrection = v == "1"
+            case "filter":   // 1 = Catmull-Rom downsample of the supersampled image, 0 = one bilinear tap
+                self.sharpDownsample = v != "0"
+                self.pushConfig()
             case "quality": if let x = Double(v) { self.settings.renderScale = min(max(x, 1), 2) }
             case "hidpi": self.settings.hiDPI = v == "1"
 
@@ -267,6 +272,9 @@ final class AppController: ObservableObject {
         let gid = preview ? nil : DisplayConfigurator.findGlassesDisplay()
 
         if !preview {
+            // Glasses taken off: leave everything paused (and, after a while, the glasses mirrored)
+            // until they're put back on.
+            if glassesOff, gid != nil { return }
             guard let gid else {
                 if glassesDisplayID != nil {
                     Log.info("Glasses display went away")
@@ -444,7 +452,7 @@ final class AppController: ObservableObject {
             // move (e.g. the glasses' display dropped and came back) restart it once the window has
             // really landed, or frames get paced by the wrong display (the laptop's, at 80 Hz).
             NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification, object: w, queue: .main) { [weak self, weak w] _ in
-                guard let self, let w, let c = self.compositor, w.isVisible else { return }
+                guard let self, let w, let c = self.compositor, w.isVisible, !self.glassesOff else { return }
                 Log.info("Output window moved to \(w.screen?.localizedName ?? "?"); re-syncing to its refresh rate")
                 c.stop()
                 c.start(fps: w.screen?.maximumFramesPerSecond ?? 120)
@@ -540,9 +548,77 @@ final class AppController: ObservableObject {
         }
     }
 
+    // MARK: Wear sensor
+
+    /// Glasses are off your face (wear sensor). Rendering and capture are paused meanwhile.
+    private var glassesOff = false
+    private var glassesOffWork: DispatchWorkItem?
+    /// The glasses screens were removed because the glasses stayed off.
+    private var screensParkedForGlassesOff = false
+
+    private func wornChanged(_ worn: Bool) {
+        guard !preview, worn == glassesOff else { return }
+        if worn { glassesPutOn() } else { glassesTakenOff() }
+    }
+
+    private func glassesTakenOff() {
+        Log.info("Glasses taken off: pausing")
+        glassesOff = true
+        compositor?.stop()
+        stopCaptures()
+        glassesOffWork?.cancel()
+        let delay = settings.glassesOffMoveDelay
+        guard delay >= 0 else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.glassesOff, !self.virtualDisplays.screens.isEmpty else { return }
+            Log.info("Glasses off for \(Int(delay)) s: moving windows to the Mac")
+            self.screensParkedForGlassesOff = true
+            // Removing the glasses screens hands their windows to the Mac's screen; mirroring the
+            // glasses keeps the pointer from wandering onto a display nobody is looking at.
+            self.stopEverything()
+            if let g = self.glassesDisplayID ?? DisplayConfigurator.findGlassesDisplay() {
+                DisplayConfigurator.mirror(g, of: DisplayConfigurator.homeDisplay(excluding: g))
+            }
+        }
+        glassesOffWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func glassesPutOn() {
+        Log.info("Glasses put on\(screensParkedForGlassesOff ? ": bringing the glasses screens back" : ": resuming")")
+        glassesOff = false
+        glassesOffWork?.cancel()
+        glassesOffWork = nil
+        let parked = screensParkedForGlassesOff
+        screensParkedForGlassesOff = false
+        if parked {
+            // Same path as plugging in: extend, recreate the screens, put the windows back.
+            extendAttempts = 0
+            scheduleReconcile()
+        } else {
+            if let w = window { compositor?.start(fps: w.screen?.maximumFramesPerSecond ?? 120) }
+            syncCaptures(restartAll: false)
+        }
+        // Screens in front of you once your head has settled.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (parked ? 4 : 0.8)) { [weak self] in
+            guard let self, !self.glassesOff else { return }
+            self.focusIndex = self.centerPanelIndex()
+            self.compositor?.send(.recenter(panel: self.focusIndex))
+        }
+    }
+
     private func glassesStateChanged(_ state: GlassesHIDService.State) {
         glassesState = state
         Log.info("Glasses state: \(state)")
+        if case .tracking = state {} else if glassesOff {
+            // Unplugged (or reconnecting) while off: the wear state is unknown now; plugging back in
+            // goes through the normal path.
+            glassesOff = false
+            screensParkedForGlassesOff = false
+            glassesOffWork?.cancel()
+            glassesOffWork = nil
+            scheduleReconcile()
+        }
         if case .tracking = state {
             compositor?.send(.trackingRestarted)
         }
@@ -882,7 +958,7 @@ final class AppController: ObservableObject {
 
         // Self-healing: if frames fall well below the glasses' refresh rate for 3 s (e.g. the
         // display link got tied to the wrong screen), re-sync the renderer.
-        if tickCount % 60 == 0, let w = window, w.isVisible, let target = w.screen?.maximumFramesPerSecond, target > 0, out.fps > 0 {
+        if tickCount % 60 == 0, !glassesOff, let w = window, w.isVisible, let target = w.screen?.maximumFramesPerSecond, target > 0, out.fps > 0 {
             if out.fps < Double(target) * 0.85 {
                 slowSeconds += 1
                 if slowSeconds >= 3 {
@@ -931,7 +1007,8 @@ final class AppController: ObservableObject {
         var c = Compositor.Config()
         c.layout = layout
         c.style = Renderer.Style(sharpen: Float(settings.sharpen), cornerRadius: Float(settings.cornerRadius),
-                                 supersample: Float(settings.renderScale), lensCorrection: settings.lensCorrection)
+                                 supersample: Float(settings.renderScale), lensCorrection: settings.lensCorrection,
+                                 sharpDownsample: sharpDownsample)
         c.mode = settings.trackingMode
         c.predictionSeconds = settings.predictionMs / 1000
         c.stabilityRadians = SpatialMath.radians(Float(settings.stabilityDegrees))

@@ -151,6 +151,13 @@ struct SettingsView: View {
                 Section("General") {
                     Toggle("Switch the glasses to extended while XRealDesk runs (required to show your screens)", isOn: $settings.autoExtendDisplay)
                     Toggle("When XRealDesk quits, mirror the glasses to the main screen", isOn: $settings.mirrorWhenQuitting)
+                    Picker("When you take the glasses off, move windows to the Mac (and back when you put them on)",
+                           selection: $settings.glassesOffMoveDelay) {
+                        Text("Never").tag(-1.0)
+                        Text("Right away").tag(0.0)
+                        Text("After 10 s").tag(10.0)
+                        Text("After 30 s").tag(30.0)
+                    }
                     Toggle("Put windows back on their glasses screens after restarts, unplugging or sleep", isOn: $settings.windowMemory)
                     Toggle("Keyboard shortcuts (⌃⌥ + key)", isOn: $settings.hotkeysEnabled)
                     Toggle("Show on-glasses notifications", isOn: $settings.showHUD)

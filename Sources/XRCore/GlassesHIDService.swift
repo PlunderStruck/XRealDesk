@@ -83,6 +83,8 @@ public final class GlassesHIDService: @unchecked Sendable {
     public var onDeviceInfo: (@Sendable (DeviceInfo?) -> Void)?
     /// Physical button events (phys id, virtual id, value), main queue.
     public var onButton: (@Sendable (UInt8, UInt8, UInt8) -> Void)?
+    /// Wear sensor: glasses put on (true) / taken off (false), main queue.
+    public var onWornChange: (@Sendable (Bool) -> Void)?
     public var logger: (@Sendable (String) -> Void)?
 
     public init(cacheDirectory: URL?, biasStore: GlassesBiasStore? = nil) {
@@ -356,6 +358,9 @@ public final class GlassesHIDService: @unchecked Sendable {
         if reply.msg == XRealProtocol.MCUMessage.eventButtonPressed.rawValue, bytes.count > 30 {
             let phys = bytes[22], virt = bytes[26], value = bytes[30]
             DispatchQueue.main.async { [onButton] in onButton?(phys, virt, value) }
+        } else if reply.msg == XRealProtocol.MCUMessage.eventWorn.rawValue, bytes.count > 22 {
+            let worn = bytes[22] != 0
+            DispatchQueue.main.async { [onWornChange] in onWornChange?(worn) }
         } else if handshaking {
             mcuReplies.append(bytes)
         }
