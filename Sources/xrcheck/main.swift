@@ -228,6 +228,87 @@ func unitChecks() {
         check(abs(yawDeg(f) - y0) < 0.5, String(format: "1°/s error recovered after steady period: drift %.2f° per minute", yawDeg(f) - y0))
     }
 
+    print("screens hold still through body motion")
+    do {
+        var rng = SplitMix(seed: 7)
+        func gyroNoise() -> SIMD3<Float> { SIMD3(rng.gauss(), rng.gauss(), rng.gauss()) * SpatialMath.radians(0.6) }
+        func accelNoise() -> SIMD3<Float> { SIMD3(rng.gauss(), rng.gauss(), rng.gauss()) * 0.004 }
+        func settled(_ s: OrientationFilter.Settings = .init()) -> OrientationFilter {
+            var f = OrientationFilter(settings: s)
+            f.update(gyro: .zero, accel: SIMD3(0, 1, 0), dt: 0.001)
+            for _ in 0..<5000 { f.update(gyro: gyroNoise(), accel: SIMD3(0, 1, 0) + accelNoise(), dt: 0.001) }
+            return f
+        }
+        var estWorst: Float = 0
+        // Leaning forward and back, shifting in the chair: the head is carried around without
+        // rotating. 0.1 g pushes for 0.3 s each way, repeated, along each horizontal axis.
+        func push(_ f: inout OrientationFilter) -> Float {
+            // Measured against the gyro alone (what the head really did, noise included), so this
+            // is only what the tilt correction added.
+            var gyroOnly = f.presented
+            var worst: Float = 0
+            estWorst = 0
+            for axis in [SIMD3<Float>(1, 0, 0), SIMD3<Float>(0, 0, 1), simd_normalize(SIMD3<Float>(1, 0, 1))] {
+                for _ in 0..<3 {
+                    for phase in [Float(1), -1, 0] {
+                        for _ in 0..<300 {
+                            f.update(gyro: gyroNoise(), accel: SIMD3(0, 1, 0) + axis * 0.1 * phase + accelNoise(), dt: 0.001)
+                            let w = f.angularVelocity, a = simd_length(w) * 0.001
+                            if a > 1e-9 { gyroOnly = gyroOnly * simd_quatf(angle: a, axis: w / simd_length(w)) }
+                            worst = max(worst, deg((gyroOnly.inverse * f.presented).angle))
+                            estWorst = max(estWorst, deg((gyroOnly.inverse * f.orientation).angle))
+                        }
+                    }
+                }
+            }
+            if ProcessInfo.processInfo.environment["XR_TRACE"] != nil { print(String(format: "    estimate moved %.3f°, drawn %.3f°", estWorst, worst)) }
+            return worst
+        }
+        var old = OrientationFilter.Settings(); old.motionGateLow = 0; old.motionGateHigh = 0; old.presentStillRate = 1e4
+        var before = settled(old), after = settled()
+        let moved0 = push(&before), moved1 = push(&after)
+        check(moved1 < 0.02 && moved1 < moved0 / 10,
+              String(format: "screens stay put while the body is pushed around: %.3f° (without the gate and presentation: %.3f°)", moved1, moved0))
+        // Real head motion still comes through exactly.
+        var f = settled()
+        let y0 = deg(SpatialMath.yawPitch(of: f.presented).yaw)
+        for _ in 0..<1000 { f.update(gyro: SIMD3(0, .pi / 2, 0) + gyroNoise(), accel: SIMD3(0, 1, 0) + accelNoise(), dt: 0.001) }
+        let turned = deg(SpatialMath.yawPitch(of: f.presented).yaw) - y0
+        check(near(turned, 90, 0.5), String(format: "a real 90° turn is drawn as %.2f°", turned))
+        // A genuine tilt error: the estimate corrects it; the screens take it on almost only while
+        // the head turns, and end up level.
+        f = settled()
+        let tilted = SpatialMath.rotationX(SpatialMath.radians(1.0)).inverse.act(SIMD3<Float>(0, 1, 0))   // gravity now says 1° pitch
+        var stillCreep: Float = 0
+        var p0 = f.presented
+        for _ in 0..<5000 {
+            f.update(gyro: gyroNoise(), accel: tilted + accelNoise(), dt: 0.001)
+            let w = f.angularVelocity, a = simd_length(w) * 0.001
+            if a > 1e-9 { p0 = p0 * simd_quatf(angle: a, axis: w / simd_length(w)) }   // gyro alone
+        }
+        stillCreep = deg((p0.inverse * f.presented).angle) / 5
+        if ProcessInfo.processInfo.environment["XR_TRACE"] != nil {
+            print(String(format: "    estimate %.3f° from drawn after 5 s", deg((f.presented.inverse * f.orientation).angle)))
+        }
+        check(stillCreep < 0.04, String(format: "while still, a 1° tilt fix creeps in at %.3f°/s (invisible)", stillCreep))
+        var tt: Float = 0
+        for _ in 0..<20000 {   // looking left and right, ±30°
+            tt += 0.001
+            let w = SIMD3<Float>(0, SpatialMath.radians(30) * 2 * .pi * 0.25 * cos(2 * .pi * 0.25 * tt), 0)
+            f.update(gyro: w + gyroNoise(), accel: tilted + accelNoise(), dt: 0.001)
+        }
+        let apart = deg((f.presented.inverse * f.orientation).angle)
+        check(apart < 0.2, String(format: "after 20 s of looking around, the screens have taken on the fix (%.2f° left)", apart))
+        // A big error (a knock) is fixed quickly even when perfectly still.
+        f = settled()
+        let knocked = SpatialMath.rotationX(SpatialMath.radians(6)).inverse.act(SIMD3<Float>(0, 1, 0))
+        for _ in 0..<12000 { f.update(gyro: gyroNoise(), accel: knocked + accelNoise(), dt: 0.001) }
+        p0 = f.presented
+        let left = deg((f.presented.inverse * f.orientation).angle)
+        check(left < 2, String(format: "a 6° error is mostly fixed within 12 s even without moving (%.2f° left)", left))
+        _ = p0
+    }
+
     print("prediction")
     do {
         let q = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
@@ -449,7 +530,7 @@ func replay(csv: String, calibrationPath: String) {
     for i in t.indices {
         let dt = i > 0 ? Float(t[i] - t[i - 1]) : 0.001
         f.update(gyro: gy[i], accel: ac[i], dt: dt)
-        q.append(f.orientation); w.append(f.angularVelocity)
+        q.append(f.presented); w.append(f.angularVelocity)
     }
     func sampleIndex(at time: Double) -> Int {   // latest sample at or before `time`
         var lo = 0, hi = t.count - 1
@@ -465,6 +546,9 @@ func replay(csv: String, calibrationPath: String) {
         var clamp: Float = 0
         /// Use the app's real GlassesHIDService.Pose.predicted() (verifies the shipped code).
         var appPose = false
+        /// Deceleration-aware prediction: use this fraction of the measured slowdown (0 = off), and
+        /// of the measured speed-up; the head is never predicted to stop and turn back.
+        var decel: Float = 0; var accel: Float = 0
     }
     let configs: [Config] = [
         .init(name: "APP CODE (Pose.predicted)", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, appPose: true),
@@ -479,18 +563,27 @@ func replay(csv: String, calibrationPath: String) {
         .init(name: "always, vel 8ms, cap 1.0x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.0),
         .init(name: "always, vel 8ms, cap 1.5x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.5),
         .init(name: "always, vel 12ms, cap 1.2x", fadeStart: 0, fadeFull: 0.001, velTau: 0.012, leash: 0.03, clamp: 1.2),
+        .init(name: "decel 1.0, cap 1.5x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.5, decel: 1.0),
+        .init(name: "decel 0.7, cap 1.5x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.5, decel: 0.7),
+        .init(name: "decel 1.0 accel 0.3, cap 1.5x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.5, decel: 1.0, accel: 0.3),
+        .init(name: "decel 1.5, cap 1.5x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.5, decel: 1.5),
+        .init(name: "decel 1.0, no cap", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, decel: 1.0),
     ]
     // Display timing: macOS shows a frame 3 refreshes after the display link asks for it, then the
     // app adds its tuned lead, plus half a frame beyond 120 Hz's (see Compositor). XR_FPS / XR_MAXAHEAD override.
     let env = ProcessInfo.processInfo.environment
     let fps = Double(env["XR_FPS"] ?? "") ?? 120
     let maxAhead = Double(env["XR_MAXAHEAD"] ?? "") ?? GlassesHIDService.Pose.maxAhead
+    let accParts = (env["XR_ACC"] ?? "0.006,0.018").split(separator: ",").compactMap { Double($0) }
+    let accTaus = (accParts.first ?? 0.006, accParts.last ?? 0.018)
     let frame = 1.0 / fps, ahead = 3 * frame + 0.014 + max(0, 0.5 / fps - 0.5 / 120)
     print(String(format: "display %.0f Hz, rendering %.1f ms ahead, prediction capped at %.0f ms", fps, ahead * 1000, maxAhead * 1000))
     print("                                     |   WORKING (<10°/s)                   |  TURNING (≥10°/s)")
     print("config                               | swim rms   p95    | shimmer rms  max | swim rms   p95")
     for c in configs {
         var vel = SIMD3<Float>(repeating: 0)
+        var accFast = SIMD3<Float>(repeating: 0), accSlow = SIMD3<Float>(repeating: 0)   // for angular acceleration
+        var appAccFast = SIMD3<Float>(repeating: 0), appAccSlow = SIMD3<Float>(repeating: 0)
         var velIdx = 0
         var st = ViewStabilizer(); st.leash = SpatialMath.radians(c.leash)
         var errs: [SIMD2<Float>] = []
@@ -502,7 +595,12 @@ func replay(csv: String, calibrationPath: String) {
             // App's prediction velocity: EMA over samples up to i.
             while velIdx <= i {
                 let dt = velIdx > 0 ? t[velIdx] - t[velIdx - 1] : 0.001
-                vel += (w[velIdx] - vel) * Float(min(1, dt / c.velTau)); velIdx += 1
+                vel += (w[velIdx] - vel) * Float(min(1, dt / c.velTau))
+                appAccFast += (w[velIdx] - appAccFast) * Float(min(1, dt / GlassesHIDService.Pose.accelerationTaus.fast))
+                appAccSlow += (w[velIdx] - appAccSlow) * Float(min(1, dt / GlassesHIDService.Pose.accelerationTaus.slow))
+                accFast += (w[velIdx] - accFast) * Float(min(1, dt / accTaus.0))
+                accSlow += (w[velIdx] - accSlow) * Float(min(1, dt / accTaus.1))
+                velIdx += 1
             }
             let horizon = Float(min(R + ahead - t[i], maxAhead))
             let speed = simd_length(vel)
@@ -518,8 +616,10 @@ func replay(csv: String, calibrationPath: String) {
             if c.appPose {
                 let pastQ = q[sampleIndex(at: t[i] - GlassesHIDService.Pose.recentWindow)]
                 let d = pastQ.inverse * q[i]
+                let taus = GlassesHIDService.Pose.accelerationTaus
                 let pose = GlassesHIDService.Pose(orientation: q[i], angularVelocity: vel, hostTime: t[i], isStill: false,
-                                                  warmedUp: true, recentRotation: 2 * acos(min(1, abs(d.real))))
+                                                  warmedUp: true, recentRotation: 2 * acos(min(1, abs(d.real))),
+                                                  angularAcceleration: (appAccFast - appAccSlow) / Float(taus.slow - taus.fast))
                 let rendered = st.update(head: pose.predicted(to: R + ahead, maxAhead: maxAhead), angularSpeed: speed, dt: Float(frame))
                 let truth = q[sampleIndex(at: R + ahead)]
                 let trueSpeed = simd_length(w[sampleIndex(at: R + ahead)])
@@ -532,6 +632,15 @@ func replay(csv: String, calibrationPath: String) {
                 continue
             }
             var predAngle = speed * horizon * gain
+            if (c.decel > 0 || c.accel > 0) && speed > 1e-6 {
+                let alongV = simd_dot((accFast - accSlow) / Float(accTaus.1 - accTaus.0), vel / speed)   // rad/s² along the motion
+                let a = alongV < 0 ? alongV * c.decel : alongV * c.accel
+                if a < 0 && speed / -a < horizon {
+                    predAngle = speed * speed / (-2 * a) * gain   // comes to rest before the frame is seen
+                } else {
+                    predAngle = (speed * horizon + 0.5 * a * horizon * horizon) * gain
+                }
+            }
             if c.clamp > 0 {
                 let past = q[sampleIndex(at: t[i] - Double(horizon))]
                 predAngle = min(predAngle, c.clamp * (past.inverse * q[i]).angle)
@@ -591,6 +700,14 @@ func replay(csv: String, calibrationPath: String) {
 
 let args = CommandLine.arguments
 if args.count > 1, args[1] == "sweep" { sweepStabilizer(); exit(0) }
+if args.count > 3, args[1] == "accelbias" {
+    for csv in args[3...] { print("\n### \((csv as NSString).lastPathComponent)"); accelBias(csv: csv, calibrationPath: args[2]) }
+    exit(0)
+}
+if args.count > 3, args[1] == "wobble" {
+    for csv in args[3...] { print("\n### \((csv as NSString).lastPathComponent)"); wobble(csv: csv, calibrationPath: args[2]) }
+    exit(0)
+}
 if args.count > 3, args[1] == "replay" {
     for csv in args[3...] { print("\n### \((csv as NSString).lastPathComponent)"); replay(csv: csv, calibrationPath: args[2]) }
     exit(0)

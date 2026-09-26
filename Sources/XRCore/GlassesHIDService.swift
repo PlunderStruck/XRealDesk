@@ -29,6 +29,17 @@ public final class GlassesHIDService: @unchecked Sendable {
         /// How far the head actually rotated over the last `recentWindow` seconds (radians).
         /// Caps prediction so a brief jolt can't be extrapolated into an overshoot.
         public var recentRotation: Float = .greatestFiniteMagnitude
+        /// Angular acceleration in the head frame, rad/s² (lightly smoothed gyro slope).
+        public var angularAcceleration = SIMD3<Float>(repeating: 0)
+        /// Smoothing for `angularAcceleration`: difference of two moving averages of the rate.
+        public static let accelerationTaus: (fast: Double, slow: Double) = (0.006, 0.018)
+        /// How much of a measured slowdown / speed-up the prediction uses. Slowing down is used in
+        /// full (a turn coming to rest is predicted to rest, not to run on and spring back — tuned on
+        /// recorded turns: ~20% less overshoot at the end of a turn); speeding up only partly.
+        public static let decelerationUse: Float = 1.0
+        public static let accelerationUse: Float = 0.3
+        /// Off: the previous constant-speed prediction (for comparing).
+        public var smoothStops = true
         public static let recentWindow: Double = 0.031
         /// Never predict more than this multiple of the rotation the head just made.
         public static let predictionCap: Float = 1.5
@@ -44,6 +55,16 @@ public final class GlassesHIDService: @unchecked Sendable {
             // than 1.5× what the head actually did over the same span just before. Turns keep
             // their full prediction; a typing jolt that barely moved the head can't overshoot.
             var angle = speed * dt
+            if smoothStops, speed > 1e-6 {
+                let along = simd_dot(angularAcceleration, angularVelocity / speed)
+                let a = along < 0 ? along * Pose.decelerationUse : along * Pose.accelerationUse
+                if a < 0 && speed < -a * dt {
+                    angle = speed * speed / (-2 * a)   // comes to rest before then; never turns back
+                } else {
+                    // Speeding up: at most half again the constant-speed guess (a glitch can't fling it).
+                    angle = min(speed * dt + 0.5 * a * dt * dt, 1.5 * speed * dt)
+                }
+            }
             let cap = Pose.predictionCap * recentRotation * Float(Double(dt) / Pose.recentWindow)
             angle = min(angle, cap)
             guard angle > 1e-7, speed > 1e-6 else { return orientation }
@@ -51,8 +72,10 @@ public final class GlassesHIDService: @unchecked Sendable {
         }
 
         public init(orientation: simd_quatf, angularVelocity: SIMD3<Float>, hostTime: TimeInterval,
-                    isStill: Bool, warmedUp: Bool, recentRotation: Float = .greatestFiniteMagnitude) {
+                    isStill: Bool, warmedUp: Bool, recentRotation: Float = .greatestFiniteMagnitude,
+                    angularAcceleration: SIMD3<Float> = .zero) {
             self.recentRotation = recentRotation
+            self.angularAcceleration = angularAcceleration.x.isFinite && angularAcceleration.y.isFinite && angularAcceleration.z.isFinite ? angularAcceleration : .zero
             self.orientation = orientation
             self.angularVelocity = angularVelocity
             self.hostTime = hostTime
@@ -104,6 +127,15 @@ public final class GlassesHIDService: @unchecked Sendable {
     /// Drop and re-open the device (e.g. after system wake).
     /// Record raw IMU samples (device ns, gyro °/s xyz, accel g xyz; sensor axes) as CSV for
     /// `seconds`, for offline tuning with `xrcheck replay`. Head motion only, nothing else.
+    /// Steady tracking (body-motion gate, tilt fixes hidden in head turns, smooth stops): on by
+    /// default; off restores the previous tracking, for side-by-side comparison.
+    public var steadyTracking: Bool {
+        get { steadyLock.withLock { $0 } }
+        set { steadyLock.withLock { $0 = newValue } }
+    }
+    private let steadyLock = OSAllocatedUnfairLock(initialState: true)
+    private var steadyApplied = true
+
     public func recordIMU(to url: URL, seconds rawSeconds: Double) {
         let seconds = rawSeconds.isFinite ? min(max(rawSeconds, 1), 3600) : 60   // "inf"/"nan" from a hook must not trap
         perform { [weak self] in
@@ -161,6 +193,10 @@ public final class GlassesHIDService: @unchecked Sendable {
     private var filter = OrientationFilter()
     private var cal = GlassesCalibration()
     private var lastDeviceTimestamp: UInt64 = 0
+    /// Host time minus device time for the fastest-delivered samples: maps the glasses' own sample
+    /// timestamps onto the host clock, so USB delivery jitter doesn't turn into pose-time jitter.
+    private var clockOffset: Double?
+    private var deliveryJitterMax = 0.0, deliveryJitterSum = 0.0
     private var lastSampleHostTime: TimeInterval = 0
     private var samplesThisWindow = 0
     private var windowStart: TimeInterval = 0
@@ -168,12 +204,14 @@ public final class GlassesHIDService: @unchecked Sendable {
     private var streaming = false
     private var lastBiasSave: TimeInterval = 0
     private var predictionOmega = SIMD3<Float>(repeating: 0)
+    private var accelFast = SIMD3<Float>(repeating: 0), accelSlow = SIMD3<Float>(repeating: 0)
     /// Recent orientations (1 per sample, ~64 ms) for the prediction cap.
     private var history = [(t: TimeInterval, q: simd_quatf)](repeating: (0, simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)), count: 64)
     private var historyIndex = 0
     private var healthWindowStart: TimeInterval = 0
     private var healthSamples = 0
     private var healthSteadySamples = 0
+    private var gateOpenSum = 0.0
     private var lastTemperature: Float = 0
     private var pendingConnect = false
     private var lastRescan: TimeInterval = 0
@@ -302,7 +340,7 @@ public final class GlassesHIDService: @unchecked Sendable {
 
         filter.reset()
         if let b = biasStore?.loadBias(serial: serial) { filter.seedBias(b) }
-        lastDeviceTimestamp = 0
+        lastDeviceTimestamp = 0; clockOffset = nil
         streaming = false
         restartAttempts = 0
 
@@ -387,10 +425,28 @@ public final class GlassesHIDService: @unchecked Sendable {
         if lastDeviceTimestamp != 0, s.timestampNs > lastDeviceTimestamp {
             dt = Float(Double(s.timestampNs - lastDeviceTimestamp) / 1e9)
         }
+        // When the sample was taken, on the host clock: device time + the lowest delivery delay seen
+        // (allowed to creep up 100 ppm for clock skew). A late-delivered sample keeps its true age.
+        let deviceSeconds = Double(s.timestampNs) / 1e9
+        let delay = now - deviceSeconds
+        if let o = clockOffset, abs(delay - o) < 0.5 {
+            clockOffset = min(delay, o + 1e-4 * Double(dt))
+        } else {
+            clockOffset = delay   // first sample, or the device clock restarted / jumped
+        }
+        let sampleTime = min(now, deviceSeconds + (clockOffset ?? now - deviceSeconds))
+        deliveryJitterMax = max(deliveryJitterMax, now - sampleTime); deliveryJitterSum += now - sampleTime
         lastDeviceTimestamp = s.timestampNs
         lastSampleHostTime = now
         streaming = true
 
+        let steady = steadyLock.withLock { $0 }
+        if steady != steadyApplied {
+            steadyApplied = steady
+            var fs = OrientationFilter.Settings()
+            if !steady { fs.motionGateLow = 0; fs.motionGateHigh = 0; fs.presentStillRate = 1e4 }
+            filter.settings = fs
+        }
         let (g, a) = cal.correct(s)
         filter.update(gyro: g, accel: a, dt: dt)
         guard filter.initialized else { return }
@@ -399,32 +455,43 @@ public final class GlassesHIDService: @unchecked Sendable {
         // spikes; tuned on recorded head motion.
         let predAlpha = min(1, dt / 0.008)
         predictionOmega += (filter.angularVelocity - predictionOmega) * predAlpha
-        history[historyIndex] = (now, filter.orientation)
+        let taus = Pose.accelerationTaus
+        accelFast += (filter.angularVelocity - accelFast) * min(1, dt / Float(taus.fast))
+        accelSlow += (filter.angularVelocity - accelSlow) * min(1, dt / Float(taus.slow))
+        history[historyIndex] = (sampleTime, filter.presented)
         historyIndex = (historyIndex + 1) % history.count
         var recent: Float = .greatestFiniteMagnitude
         for k in 1..<history.count {   // newest sample at least `recentWindow` old
             let h = history[(historyIndex - 1 - k + history.count * 2) % history.count]
-            if h.t > 0 && now - h.t >= Pose.recentWindow {
-                let d = h.q.inverse * filter.orientation
+            if h.t > 0 && sampleTime - h.t >= Pose.recentWindow {
+                let d = h.q.inverse * filter.presented
                 recent = 2 * acos(min(1, abs(d.real)))   // shortest rotation angle
                 break
             }
         }
-        let pose = Pose(orientation: filter.orientation, angularVelocity: predictionOmega,
-                        hostTime: now, isStill: filter.isStill, warmedUp: filter.elapsed > 1.2, recentRotation: recent)
-        poseLock.withLock { $0 = pose }
+        var pose = Pose(orientation: filter.presented, angularVelocity: predictionOmega,
+                        hostTime: sampleTime, isStill: filter.isStill, warmedUp: filter.elapsed > 1.2, recentRotation: recent,
+                        angularAcceleration: (accelFast - accelSlow) / Float(taus.slow - taus.fast))
+        pose.smoothStops = steady
+        let latest = pose
+        poseLock.withLock { $0 = latest }
 
         // Tracking health, logged every 30 s: drift correction, steadiness, temperature.
         lastTemperature = s.temperatureC
         healthSamples += 1
         if filter.isStill { healthSteadySamples += 1 }
+        gateOpenSum += Double(filter.gravityTrust)
         if healthWindowStart == 0 { healthWindowStart = now }
         if now - healthWindowStart >= 30 {
             let b = filter.learnedBias * (180 / .pi)
             let tb = filter.tiltBias * (180 / .pi)
-            log(String(format: "Tracking health: drift correction (%.3f, %.3f, %.3f) °/s, tilt correction (%.3f, %.3f, %.3f) °/s, level within %.2f°, steady %.0f%% of last 30 s, IMU %.1f °C",
-                       b.x, b.y, b.z, tb.x, tb.y, tb.z, filter.tiltError * 180 / .pi,
-                       100 * Double(healthSteadySamples) / Double(max(healthSamples, 1)), lastTemperature))
+            let apart = (filter.presented.inverse * filter.orientation).angle * 180 / .pi
+            log(String(format: "Tracking health: drift correction (%.3f, %.3f, %.3f) °/s, tilt correction (%.3f, %.3f, %.3f) °/s, level within %.2f°, drawn %.2f° from level, body-motion gate open %.0f%%, steady %.0f%% of last 30 s, USB delivery delay avg %.2f ms max %.2f ms, IMU %.1f °C",
+                       b.x, b.y, b.z, tb.x, tb.y, tb.z, filter.tiltError * 180 / .pi, min(apart, 360 - apart),
+                       100 * gateOpenSum / Double(max(healthSamples, 1)),
+                       100 * Double(healthSteadySamples) / Double(max(healthSamples, 1)),
+                       deliveryJitterSum / Double(max(healthSamples, 1)) * 1000, deliveryJitterMax * 1000, lastTemperature))
+            deliveryJitterMax = 0; deliveryJitterSum = 0; gateOpenSum = 0
             healthWindowStart = now; healthSamples = 0; healthSteadySamples = 0
         }
 

@@ -67,7 +67,7 @@ func shaderChecks() {
     od.usage = [.renderTarget]; od.storageMode = .shared
     let out = device.makeTexture(descriptor: od)!
 
-    struct Scene { var layout: ScreenLayout; var yaw: Float = 0; var pitch: Float = 0 }
+    struct Scene { var layout: ScreenLayout; var yaw: Float = 0; var pitch: Float = 0; var eye = SIMD3<Float>(repeating: 0) }
     func render(_ scene: Scene, screens: [MTLTexture], lens: Bool = false, configure: (inout RendererShaders.DirectUniforms) -> Void = { _ in },
                 cursorOn: Int? = nil) -> [SIMD4<Float>] {
         let panels = Array(scene.layout.panels.prefix(8))
@@ -79,7 +79,7 @@ func shaderChecks() {
         if gpuPanels.isEmpty { gpuPanels.append(.init(arcCenter: 0, height: 0, width: 1, panelHeight: 1, highlight: 0, dim: 0,
                                                      hasTexture: 0, hasCursor: 0, cursorRect: .zero)) }
         let head = SpatialMath.orientation(yaw: scene.yaw, pitch: scene.pitch)
-        let view = simd_float4x4(head.inverse) * simd_float4x4(scene.layout.tiltRotation)
+        let view = simd_float4x4(head.inverse) * SpatialMath.translation(-scene.eye) * simd_float4x4(scene.layout.tiltRotation)
         let radius = scene.layout.radius.isFinite ? scene.layout.radius : 0
         var u = RendererShaders.DirectUniforms(
             invView: view.inverse, focal: SIMD2(2697, 2711), center: SIMD2(960, 547),
@@ -112,6 +112,28 @@ func shaderChecks() {
     }
     // The image centre is the calibrated principal point, scaled to the output.
     let cx = Int(960.0 / 1920 * Double(outW)), cy = Int(547.0 / 1080 * Double(outH))
+
+    print("renderer shader: eye position (neck model)")
+    do {
+        // Moving the eye 5 cm right must shift a screen 1.5 m away left by atan(0.05/1.5) = 1.91°.
+        let layout = ScreenLayout(count: 1, rows: 1, widthDegrees: 33, aspect: 16.0 / 9, gapDegrees: 1.5, curve: 0)
+        func markerX(_ px: [SIMD4<Float>]) -> Float? {
+            var sum: Float = 0, n: Float = 0
+            for x in 0..<outW {
+                let c = px[cy * outW + x]
+                if abs(c.x - c.y) < 0.02, abs(c.y - c.z) < 0.02, c.x > 0.1, c.x < 0.4 { sum += Float(x); n += 1 }
+            }
+            return n > 0 ? sum / n : nil
+        }
+        let focalOut = 2697 * Float(outW) / 1920
+        if let a = markerX(render(Scene(layout: layout), screens: bigScreens)),
+           let b = markerX(render(Scene(layout: layout, eye: SIMD3(0.05, 0, 0)), screens: bigScreens)) {
+            let shiftDeg = deg(atan((a - b) / focalOut))
+            check(abs(shiftDeg - deg(atan(0.05 / 1.5))) < 0.1, String(format: "eye 5 cm right: screen shifts left %.2f° (expected %.2f°)", shiftDeg, deg(atan(0.05 / 1.5))))
+        } else {
+            check(false, "marker visible for the eye-position check")
+        }
+    }
 
     print("renderer shader: geometry")
     var geomBad: [String] = []

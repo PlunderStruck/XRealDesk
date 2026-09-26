@@ -6,7 +6,7 @@ final class Hotkeys {
     enum Action: UInt32, CaseIterable {
         case recenter = 1, toggleMode, previousScreen, nextScreen, zoomIn, zoomOut, toggleGazeCursor,
              raise, lower, moreCurve, lessCurve, controlPanel, rollClockwise, rollCounterClockwise,
-             morePrediction, lessPrediction, cycleSubpixel
+             morePrediction, lessPrediction, cycleSubpixel, compareTracking
 
         var keyCode: Int {
             switch self {
@@ -27,6 +27,7 @@ final class Hotkeys {
             case .morePrediction: return kVK_ANSI_Quote
             case .lessPrediction: return kVK_ANSI_Semicolon
             case .cycleSubpixel: return kVK_ANSI_T
+            case .compareTracking: return kVK_ANSI_S
             }
         }
 
@@ -49,6 +50,7 @@ final class Hotkeys {
             case .morePrediction: return "⌃⌥'"
             case .lessPrediction: return "⌃⌥;"
             case .cycleSubpixel: return "⌃⌥T"
+            case .compareTracking: return "⌃⌥S"
             }
         }
     }

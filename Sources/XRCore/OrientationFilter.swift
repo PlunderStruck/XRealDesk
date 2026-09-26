@@ -19,6 +19,18 @@ public struct OrientationFilter: Sendable {
     public struct Settings: Sendable {
         /// Correction gain toward gravity after warm-up (rad/s per unit error).
         public var gravityGain: Float = 0.25
+        /// What the screens are drawn with (`presented`) follows the gyro exactly, and takes on the
+        /// tilt corrections above only gradually: at this rate while the head is still (1/s; a
+        /// correction made while you sit still is a visible creep, so it's tiny)…
+        public var presentStillRate: Float = 0.03
+        /// …plus this much per rad/s of head rotation: corrections ride along with head movement,
+        /// where they're invisible (1.5 → a 1° correction moves at 1.5% of head speed)…
+        public var presentMotionRate: Float = 1.5
+        public var presentMotionMax: Float = 0.6
+        /// …and fast regardless once they differ by more than 1.5–3° (a knock, a gyro glitch).
+        public var presentLargeRate: Float = 0.5
+        public var presentLargeStart: Float = 0.026
+        public var presentLargeFull: Float = 0.052
         /// Integral gain: learns tilt-axis gyro error from gravity continuously, even while moving,
         /// so the horizon converges to exactly level instead of settling crooked.
         public var gravityIntegralGain: Float = 0.02
@@ -29,6 +41,20 @@ public struct OrientationFilter: Sendable {
         public var warmupSeconds: Float = 1.0
         /// Accelerometer magnitude must be within this of 1 g to be trusted as gravity.
         public var accelTrustBand: Float = 0.12
+        /// Body-motion gate. The accelerometer can't tell gravity from the head being pushed around
+        /// (leaning, shifting in the chair, the jolt at the start and end of a turn), and correcting
+        /// toward a fooled reading tilts the screens although the head didn't rotate. Those pushes
+        /// show up as the world-frame accelerometer reading moving away from its recent average,
+        /// so the tilt correction pauses while that happens and fades back in afterwards.
+        /// 0 disables the gate. Deviation (g) below which the reading is fully trusted…
+        public var motionGateLow: Float = 0.004
+        /// …and above which it's ignored.
+        public var motionGateHigh: Float = 0.012
+        /// Seconds for trust to return once the push has passed.
+        public var motionGateRecovery: Float = 0.4
+        /// Fast head turns (rad/s) also pause it: centripetal force reads as tilt.
+        public var turnGateStart: Float = 0.35   // 20 °/s
+        public var turnGateFull: Float = 0.87    // 50 °/s
         /// Largest bias correction ever accepted: a steady rate further than this from the current
         /// bias estimate is treated as real (slow) motion, not sensor error.
         public var biasGate: Float = 0.007               // rad/s (0.4 °/s)
@@ -69,6 +95,17 @@ public struct OrientationFilter: Sendable {
     private var gyroVar = SIMD3<Float>(repeating: 0)      // ~0.5 s variance around the slow mean
     private var slowGyroValid = false
     private var slowAccelNorm: Float = 1
+    /// World-frame accelerometer reading: ~20 ms and ~0.5 s averages (body-motion gate).
+    private var fastWorldAccel = SIMD3<Float>(0, 1, 0), slowWorldAccel = SIMD3<Float>(0, 1, 0)
+    private var worldAccelValid = false
+    /// Orientation to draw the screens with: `orientation`'s motion exactly, its tilt corrections
+    /// only gradually and mostly while the head turns (see Settings.presentStillRate).
+    public private(set) var presented = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+    private var presentedValid = false
+    /// Head rotation rate averaged over ~50 ms: sensor noise mustn't count as the head moving.
+    private var presentMotion = SIMD3<Float>(repeating: 0)
+    /// How much the accelerometer is trusted right now (0…1), from the body-motion gate.
+    public private(set) var gravityTrust: Float = 1
 
     public init(settings: Settings = Settings()) { self.settings = settings }
 
@@ -83,6 +120,9 @@ public struct OrientationFilter: Sendable {
         tiltError = 0
         slowGyroValid = false
         isStill = false
+        worldAccelValid = false
+        presentedValid = false
+        gravityTrust = 1
     }
 
     /// Seed bias from a previous session (persisted per headset) so yaw is stable immediately.
@@ -146,15 +186,35 @@ public struct OrientationFilter: Sendable {
         var omega = rawGyro - learnedBias - tiltBias
         angularVelocity = omega
 
+        // --- Body-motion gate (see Settings.motionGateLow).
+        let warm = elapsed < settings.warmupSeconds
+        let worldAccel = orientation.act(accel)
+        if !worldAccelValid { fastWorldAccel = worldAccel; slowWorldAccel = worldAccel; worldAccelValid = true }
+        fastWorldAccel += (worldAccel - fastWorldAccel) * min(1, dt / 0.02)
+        slowWorldAccel += (worldAccel - slowWorldAccel) * min(1, dt / 0.5)
+        if settings.motionGateHigh > settings.motionGateLow, !warm {
+            func smooth(_ x: Float, _ a: Float, _ b: Float) -> Float {
+                let t = min(max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t)
+            }
+            let pushed = smooth(simd_length(fastWorldAccel - slowWorldAccel), settings.motionGateLow, settings.motionGateHigh)
+            let turning = smooth(simd_length(fastGyro - learnedBias), settings.turnGateStart, settings.turnGateFull)
+            let open = (1 - pushed) * (1 - turning)
+            // Closes at once, reopens gradually.
+            gravityTrust = open < gravityTrust ? open : min(open, gravityTrust + dt / max(settings.motionGateRecovery, 1e-3))
+        } else {
+            gravityTrust = 1
+        }
+
         // --- Gravity correction (pitch / roll only), proportional + integral.
+        let gyroRate = omega   // head motion alone, before the tilt correction
         if abs(aNorm - 1) < settings.accelTrustBand {
             let measuredUp = accel / aNorm
             let estimatedUp = orientation.inverse.act(SIMD3(0, 1, 0))
             let error = simd_cross(measuredUp, estimatedUp)
             tiltError += (asin(min(1, simd_length(error))) - tiltError) * min(1, dt / 2)
-            // Trust gravity less while the head is accelerating (|a| away from 1 g).
-            let trust = max(0, 1 - abs(aNorm - 1) / settings.accelTrustBand)
-            let warm = elapsed < settings.warmupSeconds
+            // Trust gravity less while the head is accelerating (|a| away from 1 g) or being pushed
+            // around (the body-motion gate).
+            let trust = max(0, 1 - abs(aNorm - 1) / settings.accelTrustBand) * (warm ? 1 : gravityTrust)
             let gain = (warm ? settings.warmupGain : settings.gravityGain) * trust
             omega += error * gain
             if !warm {
@@ -170,6 +230,27 @@ public struct OrientationFilter: Sendable {
         let angle = simd_length(omega) * dt
         if angle > 1e-9 {
             orientation = (orientation * simd_quatf(angle: angle, axis: omega / simd_length(omega))).normalized
+        }
+
+        // --- What the screens are drawn with: the same head motion, the estimate's tilt
+        // corrections folded in gradually, mostly while the head turns.
+        if warm || !presentedValid {
+            presented = orientation; presentedValid = !warm; presentMotion = .zero
+        } else {
+            presentMotion += (gyroRate - presentMotion) * min(1, dt / 0.05)
+            let turn = simd_length(gyroRate) * dt
+            if turn > 1e-9 { presented = presented * simd_quatf(angle: turn, axis: gyroRate / simd_length(gyroRate)) }
+            var diff = presented.inverse * orientation
+            if diff.real < 0 { diff = simd_quatf(vector: -diff.vector) }
+            let apart = diff.angle
+            if apart > 1e-7 {
+                let t = min(max((apart - settings.presentLargeStart) / max(settings.presentLargeFull - settings.presentLargeStart, 1e-6), 0), 1)
+                let rate = settings.presentStillRate
+                    + min(settings.presentMotionRate * simd_length(presentMotion), settings.presentMotionMax)
+                    + settings.presentLargeRate * t * t * (3 - 2 * t)
+                presented = presented * simd_quatf(angle: apart * min(1, rate * dt), axis: diff.axis)
+            }
+            presented = presented.normalized
         }
     }
 

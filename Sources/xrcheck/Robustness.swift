@@ -106,17 +106,25 @@ func robustnessChecks(calibrationJSON: Data?) {
         var f = OrientationFilter()
         settle(&f, seconds: 2)
         for _ in 0..<50 { f.update(gyro: g, accel: a, dt: dt) }
-        let during = finite(f.orientation) && finite(f.predicted(by: 0.03))
+        let during = finite(f.orientation) && finite(f.predicted(by: 0.03)) && finite(f.presented)
         settle(&f, seconds: 5)
         let (_, pitch) = SpatialMath.yawPitch(of: f.orientation)
-        let recovered = finite(f.orientation) && abs(SpatialMath.degrees(pitch)) < 3
-        check(during && recovered, "\(name): orientation stays finite and settles back to level (pitch \(String(format: "%.1f", SpatialMath.degrees(pitch)))°)")
+        let (_, drawnPitch) = SpatialMath.yawPitch(of: f.presented)
+        let recovered = finite(f.orientation) && finite(f.presented) && abs(SpatialMath.degrees(pitch)) < 3 && abs(SpatialMath.degrees(drawnPitch)) < 3
+        check(during && recovered, "\(name): orientation stays finite and settles back to level (pitch \(String(format: "%.1f", SpatialMath.degrees(pitch)))°, drawn \(String(format: "%.1f", SpatialMath.degrees(drawnPitch)))°)")
     }
 
     print("robustness: prediction")
     let pose = GlassesHIDService.Pose(orientation: simd_quatf(ix: 0, iy: 0, iz: 0, r: 1), angularVelocity: SIMD3(.nan, 0, 0),
                                       hostTime: 10, isStill: false, warmedUp: true, recentRotation: 1)
     check(finite(pose.predicted(to: 10.03)), "prediction with a NaN velocity stays finite")
+    for acc in [SIMD3<Float>(.nan, 0, 0), SIMD3(0, -1e30, 0), SIMD3(0, 1e30, 0), SIMD3(0, .infinity, 0), SIMD3(0, -500, 0), SIMD3(0, 5000, 0)] {
+        let p = GlassesHIDService.Pose(orientation: simd_quatf(ix: 0, iy: 0, iz: 0, r: 1), angularVelocity: SIMD3(0, 2, 0),
+                                       hostTime: 10, isStill: false, warmedUp: true, recentRotation: 1, angularAcceleration: acc)
+        let a = p.predicted(to: 10.04).angle
+        check(finite(p.predicted(to: 10.04)) && a >= 0 && a <= 1.5 * 2 * 0.04 + 1e-4,
+              "prediction with angular acceleration \(acc) stays finite, never beyond constant speed by much, never backwards")
+    }
     let fast = GlassesHIDService.Pose(orientation: simd_quatf(ix: 0, iy: 0, iz: 0, r: 1), angularVelocity: SIMD3(0, 1e6, 0),
                                       hostTime: 10, isStill: false, warmedUp: true, recentRotation: .infinity)
     check(finite(fast.predicted(to: 11)) && finite(fast.predicted(to: -100)) && finite(fast.predicted(to: .infinity)),

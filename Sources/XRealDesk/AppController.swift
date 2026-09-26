@@ -59,6 +59,11 @@ final class AppController: ObservableObject {
     private var window: GlassesWindow?
     /// Side-by-side 3D with real depth (experimental; the flat picture felt better on the Air 2 Pro).
     private var stereoDepth = false
+    /// Neck model in 2D (`set neck=0|1`, for comparing): on by default.
+    private var neckModel = true
+    /// ⌃⌥S cycles tracking for comparison: 0 new (steady + neck model), 1 steady without the neck
+    /// model, 2 the previous tracking.
+    private var trackingCompare = 0
     private var sharpDownsample = true
     private var directRender = true
     private var renderer: Renderer?
@@ -236,6 +241,13 @@ final class AppController: ObservableObject {
             case "depth":   // side-by-side 3D: 1 = real depth, 0 = the same flat picture in both eyes (default)
                 self.stereoDepth = v == "1"
                 self.pushConfig()
+            case "steady":  // steady tracking: 1 = on (default), 0 = the previous tracking, for comparing
+                self.hid.steadyTracking = v != "0"
+                self.hud(self.hid.steadyTracking ? "Steady tracking on" : "Steady tracking off (old)")
+            case "neck":    // 2D neck model: 1 = on (default), 0 = rotation only
+                self.neckModel = v != "0"
+                self.pushConfig()
+                self.hud(self.neckModel ? "Neck model on" : "Neck model off")
             default: Log.info("Unknown set command \(arg)")
             }
         }
@@ -890,6 +902,12 @@ final class AppController: ObservableObject {
             settings.subpixel = (settings.subpixel + 1) % 5
             let names = ["Off", "RGB  (1)", "BGR  (2)", "RGB, vertical  (3)", "BGR, vertical  (4)"]
             hud("Subpixel text: \(names[settings.subpixel])")
+        case .compareTracking:
+            trackingCompare = (trackingCompare + 1) % 3
+            hid.steadyTracking = trackingCompare != 2
+            neckModel = trackingCompare == 0
+            pushConfig()
+            hud(["Tracking: new (steady + neck model)", "Tracking: steady, no neck model", "Tracking: old"][trackingCompare])
         case .toggleGazeCursor:
             settings.cursorFollowsGaze.toggle()
             hud(settings.cursorFollowsGaze ? "Cursor follows gaze: on" : "Cursor follows gaze: off")
@@ -1184,6 +1202,7 @@ final class AppController: ObservableObject {
         c.smartFlick = settings.smartFlick
         c.rollRadians = SpatialMath.radians(Float(settings.rollDegrees))
         c.flat3D = !stereoDepth
+        c.neckModel = neckModel
         c.preview = preview
         return c
     }

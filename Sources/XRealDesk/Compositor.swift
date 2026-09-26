@@ -29,6 +29,9 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         /// Side-by-side output but the same flat picture in both eyes (no depth). Default: depth felt
         /// warpy on head turns (60 Hz, rotation-only tracking) while the flat picture felt clean.
         var flat3D = true
+        /// Flat pictures (2D, or the same picture in both eyes) also get the neck model, scaled to
+        /// where the eyes converge on them (the displays' factory convergence, ~3.6 m).
+        var neckModel = true
         var preview = false
         var version = 0
     }
@@ -414,8 +417,20 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         // (a failed download mustn't stretch one view across both eyes); depth does.
         let stereo = !cfg.preview && size.width * 10 > size.height * 25
         let eyes: [Renderer.EyeView]
+        // Flat picture: both eyes see the same image, so they converge where the two displays do
+        // (~3.6 m) and the screens are seen at that distance, whatever the layout's own distance.
+        // Turning or nodding swings the eyes around the neck; a real object 3.6 m away shifts by
+        // the matching parallax, and screens drawn without it ride along with the head a little
+        // (~0.5° on a 20° turn) — a faint swim. The neck offset is scaled so the parallax matches
+        // 3.6 m while the geometry stays at the layout's distance. Not in head-locked mode, where
+        // the screens are meant to move with the head.
+        var flatView = simd_float4x4(viewRot)
+        if cfg.neckModel, cfg.mode != .headLocked, !cfg.preview {
+            let neck = Compositor.neckToEyes * (layout.distance / (cal.convergenceDistance ?? 3.6))
+            flatView = SpatialMath.translation(-neck) * simd_float4x4(viewRot) * SpatialMath.translation(neck)
+        }
         if stereo && (cfg.flat3D || cal.eyes.count != 2) {
-            let flat = Renderer.EyeView(intrinsics: intrinsics, view: simd_float4x4(viewRot), map: 0)
+            let flat = Renderer.EyeView(intrinsics: intrinsics, view: flatView, map: 0)
             eyes = [flat, flat]
         } else if stereo {
             // Neck model: heads turn and tilt about the neck, so the eyes also move a few cm. Without
@@ -427,7 +442,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
                 Renderer.EyeView(intrinsics: intrinsics, view: cal.eyeView(i) * headView, map: 0)
             }
         } else {
-            eyes = [Renderer.EyeView(intrinsics: intrinsics, view: simd_float4x4(viewRot), map: 0)]
+            eyes = [Renderer.EyeView(intrinsics: intrinsics, view: flatView, map: 0)]
         }
         if stereo != lastStereo {
             lastStereo = stereo
