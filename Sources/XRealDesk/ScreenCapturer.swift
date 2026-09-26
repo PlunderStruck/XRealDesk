@@ -100,6 +100,23 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
     }
 
+    /// Keeps capture at the display's real pixel size. A display can finish switching to HiDPI a
+    /// moment after capture started, which left it captured at half resolution for the whole session.
+    func matchSize(_ pixels: CGSize) {
+        let w = Int(pixels.width), h = Int(pixels.height)
+        guard w > 0, h > 0 else { return }
+        let (stream, cfg) = control.withLock { c -> (SCStream?, SCStreamConfiguration?) in
+            guard let cfg = c.config, cfg.width != w || cfg.height != h else { return (nil, nil) }
+            cfg.width = w; cfg.height = h
+            return (c.stream, cfg)
+        }
+        guard let stream, let cfg else { return }
+        Log.info("Screen \(index + 1): capture size now \(w)x\(h)")
+        stream.updateConfiguration(cfg) { [index] error in
+            if let error { Log.error("Screen \(index + 1): changing capture size failed: \(error.localizedDescription)") }
+        }
+    }
+
     private func frameInterval(active: Bool) -> CMTime {
         CMTime(value: 1, timescale: CMTimeScale(active ? max(30, refreshRate) : 10))
     }

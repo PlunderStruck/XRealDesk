@@ -104,7 +104,7 @@ struct SettingsView: View {
                             .font(.callout).foregroundStyle(.green)
                     } else {
                         Button { settings.applyRecommended() } label: { Label("Use recommended settings", systemImage: "star") }
-                            .help("Smart mode, 120 Hz, best picture and tracking. Keeps your screen layout.")
+                            .help("HiDPI, Smart mode, 120 Hz, best picture and tracking. Keeps your screen layout.")
                     }
                 }
             }
@@ -165,7 +165,7 @@ struct SettingsView: View {
                 Picker("Resolution", selection: $settings.resolutionID) {
                     ForEach(ResolutionPreset.all) { Text($0.title).tag($0.id) }
                 }
-                Toggle("HiDPI: sharper text, uses more graphics power", isOn: $settings.hiDPI)
+                Toggle("HiDPI: much sharper text (recommended)", isOn: $settings.hiDPI)
                 Picker("Refresh rate", selection: $settings.refreshRate) {
                     Text("60 Hz").tag(60); Text("120 Hz").tag(120)
                 }

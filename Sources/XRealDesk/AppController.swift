@@ -986,8 +986,10 @@ final class AppController: ObservableObject {
         if simd_length(out.viewYawPitch - live.viewYawPitch) > SpatialMath.radians(0.3) { live.viewYawPitch = out.viewYawPitch }
         if abs(out.fps - live.renderFPS) > 0.5 { live.renderFPS = out.fps }
         if live.sideBySide != out.sideBySide { live.sideBySide = out.sideBySide }
-        // Capture screens near your view at full rate, the rest at a trickle (1 s grace after leaving).
+        // Capture screens near your view at full rate, the rest at a trickle (1 s grace after leaving),
+        // and always at the screen's real pixel size (checked once a second).
         for c in captures {
+            if tickCount % 60 == 30, let px = VirtualDisplayManager.pixelSize(of: c.displayID) { c.matchSize(px) }
             if !out.tracking || out.nearView.contains(c.index) { lastNearView[c.index] = now }
             c.setActive(now - (lastNearView[c.index] ?? now) < 1)
         }

@@ -191,7 +191,7 @@ final class Settings: ObservableObject {
 
     init() {
         d.register(defaults: [
-            "screenCount": 3, "rows": 1, "resolution": ResolutionPreset.default.id, "hiDPI": false,
+            "screenCount": 3, "rows": 1, "resolution": ResolutionPreset.default.id, "hiDPI": true,
             "refreshRate": 120, "glassesIsMain": false,
             "screenWidthDegrees": 33.0, "gapDegrees": 1.5, "curve": 0.55, "tiltDegrees": 0.0,
             "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
@@ -267,9 +267,11 @@ final class Settings: ObservableObject {
         }?.id
     }
 
-    /// The settings that work best on the Air 2 Pro (measured over many sessions). Leaves your
-    /// layout (screens, size, curve, placement) alone.
+    /// The settings that work best on the Air 2 Pro (measured over many sessions): HiDPI screens,
+    /// Smart mode, 120 Hz, the best picture and tracking. Leaves your layout (screens, size, curve,
+    /// placement) alone.
     func applyRecommended() {
+        hiDPI = true
         trackingMode = .smart
         refreshRate = 120
         renderScale = 2
@@ -290,7 +292,7 @@ final class Settings: ObservableObject {
 
     /// True when every recommended value is already set.
     var isRecommended: Bool {
-        trackingMode == .smart && refreshRate == 120 && renderScale == 2 && lensCorrection && predictionMs == 14
+        hiDPI && trackingMode == .smart && refreshRate == 120 && renderScale == 2 && lensCorrection && predictionMs == 14
             && abs(stabilityDegrees - 0.03) < 0.001 && cursorFollowsGaze && keyboardFollowsGaze && windowMemory
             && autoExtendDisplay && mirrorWhenQuitting
     }
