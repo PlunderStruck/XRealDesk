@@ -26,6 +26,12 @@ public enum Arrangement {
         case .below: top = home.maxY.rounded()
         case .left, .right: top = (home.midY - gridH / 2).rounded()
         }
+        // Custom: screens without a saved position (you added screens since saving) go in a row on top
+        // of everything, so they can never overlap a saved one.
+        var extraSlot = 0
+        let saved = customOffsets.filter { $0.key < cells.count }.map { CGRect(x: home.minX + $0.value.x, y: home.minY + $0.value.y, width: sw, height: sh) }
+        let extraTop = ((saved + [home]).map(\.minY).min() ?? home.minY) - sh
+        let extraLeft = ((saved.isEmpty ? [home] : saved).min { $0.minY < $1.minY } ?? home).minX
         return cells.enumerated().map { i, c in
             let fromTop = CGFloat(rowCount - 1 - c.row)   // visual row index counted from the top
             let y = top + fromTop * sh
@@ -39,8 +45,12 @@ public enum Arrangement {
             case .right:
                 x = home.maxX.rounded() + CGFloat(c.col) * sw
             }
-            if placement == .custom, let o = customOffsets[i] {
-                return CGPoint(x: (home.minX + o.x).rounded(), y: (home.minY + o.y).rounded())   // your own arrangement
+            if placement == .custom {
+                if let o = customOffsets[i] {
+                    return CGPoint(x: (home.minX + o.x).rounded(), y: (home.minY + o.y).rounded())   // your own arrangement
+                }
+                defer { extraSlot += 1 }
+                return CGPoint(x: extraLeft.rounded() + CGFloat(extraSlot) * sw, y: extraTop.rounded())
             }
             return CGPoint(x: x, y: y)
         }

@@ -63,6 +63,9 @@ final class AppController: ObservableObject {
     private let windows = WindowKeeper()
     private var tickCount = 0
     private var slowSeconds = 0
+    private var screenChangeObserver: NSObjectProtocol?
+    private var failedRepairs = 0
+    private var lastNearView: [Int: TimeInterval] = [:]
     private var lastResync: TimeInterval = 0
     private var lastWindowLook: TimeInterval = 0
     private var lastFrontPID: pid_t = 0
@@ -197,6 +200,7 @@ final class AppController: ObservableObject {
             case "height": if let x = Double(v) { self.settings.tiltDegrees = x }
             case "mode": if let m = TrackingMode(rawValue: v) { self.setMode(m) }
             case "lens": self.settings.lensCorrection = v == "1"
+            case "diagnostics": self.settings.diagnosticLog = v == "1"
             case "refresh": if let x = Int(v), x == 60 || x == 120 { self.settings.refreshRate = x }
             case "direct":   // 1 = single-pass renderer (default), 0 = two-pass (supersample + warp)
                 self.directRender = v != "0"
@@ -365,6 +369,11 @@ final class AppController: ObservableObject {
         ensureWindow(on: screen)
         cursor.guardDisplay = preview ? nil : gid
         arrangeIfNeeded(glasses: gid)
+        // Captures that were paused (glasses off) or lost resume here once the screens are up.
+        if !glassesOff, !virtualDisplays.screens.isEmpty, captures.count < virtualDisplays.screens.count,
+           virtualDisplays.screens.allSatisfy({ CGDisplayIsOnline($0.id) != 0 }) {
+            syncCaptures(restartAll: false)
+        }
     }
 
     private func ensureVirtualDisplays() {
@@ -416,8 +425,13 @@ final class AppController: ObservableObject {
                 return
             }
             self.arrangeIfNeeded(glasses: self.glassesDisplayID)
+            if !online {
+                // Never all online: still let window memory resume instead of staying off all session.
+                Log.error("Not all glasses screens came online")
+                self.restoreWindows()
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                guard let self, generation == self.displayGeneration else { return }
+                guard let self, generation == self.displayGeneration, !self.glassesOff else { return }
                 self.syncCaptures(restartAll: self.restartCapturesAfterModes)
                 self.restartCapturesAfterModes = false
             }
@@ -468,10 +482,14 @@ final class AppController: ObservableObject {
             window = w
             let c = Compositor(renderer: renderer, layer: w.hostView.metalLayer, hid: hid)
             compositor = c
+            // A new compositor starts without a cursor image: send it the current one again.
+            cursorSignature = ""
+            c.setCursorVisible(cursorVisible)
             // The display link binds to whichever screen the window is on when it starts. After a
             // move (e.g. the glasses' display dropped and came back) restart it once the window has
             // really landed, or frames get paced by the wrong display (the laptop's, at 80 Hz).
-            NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification, object: w, queue: .main) { [weak self, weak w] _ in
+            if let o = screenChangeObserver { NotificationCenter.default.removeObserver(o) }
+            screenChangeObserver = NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification, object: w, queue: .main) { [weak self, weak w] _ in
                 guard let self, let w, let c = self.compositor, w.isVisible, !self.glassesOff else { return }
                 Log.info("Output window moved to \(w.screen?.localizedName ?? "?"); re-syncing to its refresh rate")
                 c.stop()
@@ -550,7 +568,8 @@ final class AppController: ObservableObject {
         compositor = nil
         uiTimer?.invalidate()
         uiTimer = nil
-        renderer?.forgetAll()   // render thread is stopped, safe to touch directly
+        renderer?.forgetAll()   // stop() waited for the render thread to exit
+        if let o = screenChangeObserver { NotificationCenter.default.removeObserver(o); screenChangeObserver = nil }
         window?.orderOut(nil)
         window = nil
         arrangedKey = nil
@@ -564,7 +583,7 @@ final class AppController: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self else { return }
             self.reconcile()
-            if !self.virtualDisplays.screens.isEmpty { self.syncCaptures(restartAll: true) }
+            if !self.virtualDisplays.screens.isEmpty, !self.glassesOff { self.syncCaptures(restartAll: true) }
         }
     }
 
@@ -636,10 +655,11 @@ final class AppController: ObservableObject {
             // Unplugged (or reconnecting) while off: the wear state is unknown now; plugging back in
             // goes through the normal path.
             glassesOff = false
+            glassesOffFace = false
             screensParkedForGlassesOff = false
             glassesOffWork?.cancel()
             glassesOffWork = nil
-            scheduleReconcile()
+            scheduleReconcile()   // restarts drawing and, if they were paused, the captures
         }
         if case .tracking = state {
             compositor?.send(.trackingRestarted)
@@ -670,11 +690,12 @@ final class AppController: ObservableObject {
                 self.permissionTimer = nil
                 self.permissionGranted = true
                 Log.info("Screen Recording permission granted")
-                if !self.virtualDisplays.screens.isEmpty { self.syncCaptures(restartAll: true) }
-                // If capture still fails after granting, macOS wants a relaunch: do it for you.
+                if !self.virtualDisplays.screens.isEmpty, !self.glassesOff { self.syncCaptures(restartAll: true) }
+                // If capture still doesn't deliver after granting, macOS wants a relaunch: do it for you.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-                    guard let self else { return }
+                    guard let self, !self.glassesOff else { return }
                     let failing = self.captures.contains { if case .failed = $0.status { return true }; return false }
+                        || (!self.captures.isEmpty && self.captures.allSatisfy { $0.latestFrame == nil })
                     self.needsRelaunchForPermission = failing
                     if failing {
                         Log.info("Screen Recording needs a restart to take effect; restarting")
@@ -691,7 +712,7 @@ final class AppController: ObservableObject {
         let path = Bundle.main.bundlePath
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", "sleep 1; open \"\(path)\""]
+        task.arguments = ["-c", "sleep 1; exec /usr/bin/open \"$0\"", path]   // path as an argument: no quoting issues
         try? task.run()
         NSApp.terminate(nil)
     }
@@ -903,6 +924,7 @@ final class AppController: ObservableObject {
         let arrangingInSystemSettings = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.systempreferences"
         if DisplayConfigurator.virtualArrangementMatches(lastPlannedOrigins, virtualIDs: ids, glasses: glassesDisplayID) {
             userRearranged = false
+            failedRepairs = 0
             return
         }
         // You're dragging screens around in System Settings → Displays: leave them alone, and when
@@ -917,6 +939,10 @@ final class AppController: ObservableObject {
         let now = Date()
         arrangementRepairs = arrangementRepairs.filter { now.timeIntervalSince($0) < 60 }
         guard arrangementRepairs.count < 3 else { return }
+        // Repairs that never stick (macOS keeps refusing the layout) would reshuffle displays forever.
+        guard failedRepairs < 5 else { return }
+        if failedRepairs == 4 { Log.error("macOS keeps refusing the planned arrangement; leaving the screens where macOS puts them") }
+        failedRepairs += 1
         arrangementRepairs.append(now)
         let actual = ids.map { "\($0)@\(CGDisplayBounds($0).origin)" }.joined(separator: " ")
         Log.info("macOS moved the glasses screens (\(actual)); putting them back")
@@ -951,7 +977,8 @@ final class AppController: ObservableObject {
         let now = CACurrentMediaTime()
         lastGaze = out.gaze
         let screens = virtualDisplays.screens.map { (index: $0.index, id: $0.id) }
-        let cursorIndex = cursor.tick(now: now, screens: screens, gazeIndex: out.gaze)
+        // Gaze only while drawing: a paused compositor's last gaze must not move the pointer or focus.
+        let cursorIndex = cursor.tick(now: now, screens: screens, gazeIndex: compositor.isRunning && !glassesOff ? out.gaze : nil)
         compositor.setCursorScreen(cursorIndex)
 
         if live.gazeScreen != out.gaze { live.gazeScreen = out.gaze }
@@ -959,6 +986,11 @@ final class AppController: ObservableObject {
         if simd_length(out.viewYawPitch - live.viewYawPitch) > SpatialMath.radians(0.3) { live.viewYawPitch = out.viewYawPitch }
         if abs(out.fps - live.renderFPS) > 0.5 { live.renderFPS = out.fps }
         if live.sideBySide != out.sideBySide { live.sideBySide = out.sideBySide }
+        // Capture screens near your view at full rate, the rest at a trickle (1 s grace after leaving).
+        for c in captures {
+            if !out.tracking || out.nearView.contains(c.index) { lastNearView[c.index] = now }
+            c.setActive(now - (lastNearView[c.index] ?? now) < 1)
+        }
         let rate = hid.sampleRate
         if abs(rate - live.imuRate) > 5 { live.imuRate = rate }
         let capturing = captures.filter { $0.status == .running }.count

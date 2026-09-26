@@ -169,8 +169,11 @@ final class WindowKeeper {
             guard let self else { return }
             var moved = 0
             var unmatched: [UInt32] = []
+            var taken = Set<CGWindowID>()
             for job in jobs {
-                if let win = self.axWindow(for: job.entry, live: job.current != nil) {
+                if let win = self.axWindow(for: job.entry, live: job.current != nil, taken: taken) {
+                    var id: CGWindowID = 0
+                    if _AXUIElementGetWindow(win, &id) == .success { taken.insert(id) }
                     self.move(win, to: job.target)
                     moved += 1
                 } else {
@@ -292,11 +295,15 @@ final class WindowKeeper {
 
     /// Find the live AX window for a memory entry: same window ID if the app is still the same
     /// process, otherwise same app (bundle) + same title.
-    private func axWindow(for e: Entry, live: Bool) -> AXUIElement? {
+    /// `taken`: windows already matched to another entry in this batch (two "zsh" Terminals must
+    /// go to two different windows, not the first one twice).
+    private func axWindow(for e: Entry, live: Bool, taken: Set<CGWindowID> = []) -> AXUIElement? {
         if live, let w = axWindow(pid: e.pid, windowID: e.windowID) { return w }
         guard let bundle = e.bundleID, let title = e.title, !title.isEmpty else { return nil }
         for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundle) {
             for w in axWindows(pid: app.processIdentifier) {
+                var id: CGWindowID = 0
+                if _AXUIElementGetWindow(w, &id) == .success, taken.contains(id) { continue }
                 var t: CFTypeRef?
                 if AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &t) == .success, (t as? String) == title {
                     return w

@@ -30,6 +30,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         /// warpy on head turns (60 Hz, rotation-only tracking) while the flat picture felt clean.
         var flat3D = true
         var preview = false
+        var version = 0
     }
 
     enum Command {
@@ -53,6 +54,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         /// The display link is pacing wrong; the main thread should restart it.
         var needsResync = false
         var sideBySide = false
+        /// Screens within reach of the view (field of view plus a margin): captured at full rate.
+        var nearView: Set<Int> = []
     }
 
     private let renderer: Renderer
@@ -78,6 +81,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
     /// thread with the new one.
     private final class RenderThread: @unchecked Sendable {
         let alive = OSAllocatedUnfairLock(initialState: true)
+        /// Signalled when the thread has finished its last frame and exited.
+        let exited = DispatchSemaphore(value: 0)
         let runLoopLock = OSAllocatedUnfairLock<CFRunLoop?>(uncheckedState: nil)
         var isAlive: Bool { alive.withLock { $0 } }
     }
@@ -100,7 +105,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
     private var fpsWindowStart: CFTimeInterval = 0
     private var statsSeconds = 0
     private var smart = SmartFollow()
-    private var distortionInstalled = false
+    private var installedMapKey: String?
     private var lastStereo = false
     private var lastCallbackAt: CFTimeInterval = 0
     private var lastCallbackCPUMs = 0.0
@@ -141,8 +146,15 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
 
     // MARK: Main-thread API
 
-    func update(_ config: Config) { configLock.withLock { $0 = config }; configVersion.withLock { $0 += 1 } }
-    private let configVersion = OSAllocatedUnfairLock(initialState: 0)
+    /// The config and its version change together (one lock): a frame can never draw an old config
+    /// under the new version, which the unchanged-frame check would then keep on screen.
+    func update(_ config: Config) {
+        configLock.withLock { c in
+            let version = c.version + 1
+            c = config
+            c.version = version
+        }
+    }
     func send(_ command: Command) { commandLock.withLock { $0.append(command) } }
     func setCaptures(_ captures: [Int: DisplayCapture]) { capturesLock.withLock { $0 = captures } }
     func setCursorScreen(_ index: Int?) { cursorLock.withLock { $0 = index } }
@@ -177,6 +189,9 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         current = nil
         ctx.alive.withLock { $0 = false }
         if let rl = ctx.runLoopLock.withLock({ $0 }) { CFRunLoopStop(rl); CFRunLoopWakeUp(rl) }
+        // Wait for the frame in progress: after stop() returns, nothing else touches the renderer's
+        // caches (callers clear them), and no frame is drawn with a stale display link.
+        if ctx.exited.wait(timeout: .now() + 1) == .timedOut { Log.error("Render thread didn't stop within 1 s") }
     }
 
     // MARK: Render thread
@@ -217,6 +232,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         }
         link.invalidate()
         Log.info("Render thread stopped")
+        ctx.exited.signal()
     }
 
     /// Serializes frames: during a stop→start handover the old thread may still be finishing one.
@@ -379,17 +395,20 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         let center = cfg.preview ? cal.resolution / 2 : SIMD2(cal.centerX, cal.centerY)
         let intrinsics = Renderer.Intrinsics(focal: SIMD2(cal.focalX, cal.focalY), center: center, calibrated: cal.resolution)
         // Install the lens-distortion maps once the factory calibration is known (not in preview).
-        let wantMap = cfg.preview ? false : cal.distortion != nil
-        if wantMap != distortionInstalled {
-            renderer.setDistortion(average: wantMap ? cal.distortion : nil, left: nil, right: nil, calibrated: cal.resolution)
-            distortionInstalled = wantMap
+        // Keyed by the calibration itself, so another headset's map replaces this one.
+        let mapKey: String? = cfg.preview ? nil : cal.distortion.map { "\($0.us.count)x\($0.vs.count)-\($0.xy.first ?? .zero)-\($0.xy.last ?? .zero)-\(cal.resolution)" }
+        if mapKey != installedMapKey {
+            renderer.setDistortion(average: mapKey != nil ? cal.distortion : nil, left: nil, right: nil, calibrated: cal.resolution)
+            installedMapKey = mapKey
         }
         // Side-by-side 3D (the glasses' button switches the display to 3840x1080): by default the same
         // flat picture in both halves; with depth on (`set depth=1`), one view per eye.
         let size = layer.drawableSize
-        let stereo = !cfg.preview && cal.eyes.count == 2 && size.width * 10 > size.height * 25
+        // Side-by-side from the picture's shape alone: the flat picture needs no per-eye calibration
+        // (a failed download mustn't stretch one view across both eyes); depth does.
+        let stereo = !cfg.preview && size.width * 10 > size.height * 25
         let eyes: [Renderer.EyeView]
-        if stereo && cfg.flat3D {
+        if stereo && (cfg.flat3D || cal.eyes.count != 2) {
             let flat = Renderer.EyeView(intrinsics: intrinsics, view: simd_float4x4(viewRot), map: 0)
             eyes = [flat, flat]
         } else if stereo {
@@ -448,7 +467,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         // contents, cursor, fades and settings)? Then the glasses already show this frame: skip it.
         // Typing with a steady head costs no GPU time at all, which leaves the GPU free for the
         // frames that do change.
-        var key: [Double] = [Double(configVersion.withLock { $0 }), Double(eyes.count), Double(layer.drawableSize.width),
+        var key: [Double] = [Double(cfg.version), Double(eyes.count), Double(installedMapKey?.hashValue ?? 0), Double(layer.drawableSize.width),
                              Double(cursorState.seq), cursorState.visible ? 1 : 0]
         for d in draws {
             key += [Double(d.index), Double(d.frame?.seq ?? 0), Double(d.highlight), (Double(d.dim) * 2048).rounded()]
@@ -516,6 +535,19 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         var out = outputLock.withLock { $0 }
         out.gaze = gaze
         out.viewYawPitch = SIMD2(vy, vp)
+        // Which screens you could see within the next ~100 ms (FOV + 20° of head turn).
+        let fovHalf = SIMD2<Float>(SpatialMath.radians(cal.fovDegrees.x / 2), SpatialMath.radians(cal.fovDegrees.y / 2))
+        let margin = SpatialMath.radians(20)
+        var near = Set<Int>()
+        for p in layout.panels {
+            var dy = p.yaw - vy
+            while dy > .pi { dy -= 2 * .pi }
+            while dy < -.pi { dy += 2 * .pi }
+            let dp = (p.pitch - layout.tilt) - vp
+            let half = SIMD2(atan(p.size.x / 2 / layout.distance), atan(p.size.y / 2 / layout.distance))
+            if abs(dy) < half.x + fovHalf.x + margin, abs(dp) < half.y + fovHalf.y + margin { near.insert(p.index) }
+        }
+        out.nearView = near
         out.tracking = tracking
         out.sideBySide = lastStereo
         if let fps { out.fps = fps }

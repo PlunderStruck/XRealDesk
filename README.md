@@ -19,9 +19,14 @@ macOS 14 or newer, Apple silicon or Intel with Metal.
 open /Applications/XRealDesk.app
 ```
 
-On first launch, allow **Screen Recording** when macOS asks. It's how the screens get into the glasses.
-Also allow **Accessibility** (Settings shows a Grant button). It lets XRealDesk put windows back on the glasses screens and move keyboard focus to the screen you look at. Everything else works without it.
-If you missed the prompt: System Settings → Privacy & Security → Screen & System Audio Recording → XRealDesk.
+On first launch a **setup assistant** walks you through everything: connecting the glasses, permissions,
+your screen layout, centering and straightening the picture, and which side of your Mac the mouse crosses.
+You can reopen it anytime from the control panel (✦ wand) or the menu.
+
+- **Screen Recording** (required) is how the screens get into the glasses. Click *Allow*, flip the switch
+  in System Settings, and come back: XRealDesk notices by itself and restarts if macOS needs it to.
+- **Accessibility** (recommended) lets XRealDesk put windows back on the glasses screens and send typing to
+  the screen you look at. Everything else works without it.
 
 ## Use
 
@@ -50,8 +55,9 @@ so macOS undoes it automatically even if the app crashes.
 
 ### Control panel
 
-- **Presets:** Single, Dual, Triple, Ultrawide (one 32:9 curved screen), Quad (2×2), Command (3×2)
-- **Live map:** where your screens are, which one you're looking at, and what the glasses can see (the dashed box). Click a screen to bring it in front of you.
+- **3D view** of your setup: the screens on their curve around you, the one you're looking at glowing, and
+  what the glasses show right now (the dashed frame). Click a screen to bring it in front of you.
+- **Presets:** Single, Dual, Triple, Wide (one 32:9 curved screen), Quad (2×2), Six (3×2)
 - **Screens / rows**, **Size**, **Curve** (flat wall to wrapped around you), **Height**, **Brightness**
 - **Mode:**
   - *Anchored*: screens stay fixed in space
@@ -62,6 +68,12 @@ so macOS undoes it automatically even if the app crashes.
 - **Tilt:** rotates the picture clockwise or counter-clockwise if the glasses sit crooked on your face.
 - **Cursor follows gaze:** look at another screen and the cursor jumps there, back to where you left it on that screen. **The keyboard follows too:** once you've settled on the screen (about half a second) and aren't mid-typing, the window you last used there gets focus, so you can look and start typing.
 - **Windows stay put:** XRealDesk remembers which windows are on which glasses screen and puts them back after a restart, unplugging, sleep or a resolution change. Windows you drag off the glasses yourself are forgotten.
+- **Taking the glasses off:** the glasses' wear sensor tells XRealDesk. It pauses right away (no GPU work), and
+  after 10 seconds (Settings → General) moves your windows to the Mac. Put the glasses back on and everything
+  returns to where it was, recentered in front of you.
+
+Settings has a **Use recommended settings** button (Smart mode, 120 Hz, best picture and tracking) that
+leaves your layout alone.
 
 ### Keyboard shortcuts
 
@@ -107,12 +119,13 @@ which gives the smoothest text at some GPU cost. **Text sharpening** helps when 
 | Part | File |
 |---|---|
 | XREAL USB HID protocol (IMU stream, factory calibration download, MCU) | `Sources/XRCore/XRealProtocol.swift`, `GlassesHIDService.swift` |
-| Sensor fusion: 1 kHz gyro integration, gravity correction, online gyro-bias learning, zero-velocity lock | `Sources/XRCore/OrientationFilter.swift` |
+| Sensor fusion: 1 kHz gyro integration, gravity correction, online gyro-bias learning, gated gyro-bias learning | `Sources/XRCore/OrientationFilter.swift` |
 | Curved layout geometry, gaze hit-testing, projection from the glasses' factory intrinsics | `Sources/XRCore/SpatialMath.swift` |
 | Virtual monitors (CoreGraphics `CGVirtualDisplay`) | `Sources/XRealDesk/VirtualDisplays.swift` |
 | Mirroring → extended, display arrangement | `Sources/XRealDesk/DisplayConfigurator.swift` |
 | Zero-copy capture (ScreenCaptureKit → IOSurface → Metal) | `Sources/XRealDesk/ScreenCapturer.swift` |
-| Rendering: curved meshes, mipmapped anisotropic sampling, sharpening, 120 Hz display link, pose prediction | `Sources/XRealDesk/Renderer.swift`, `AppController.swift` |
+| Rendering in one pass: each glasses pixel is traced through the factory lens map onto the curved screen wall and filtered once (Catmull-Rom, gamma-correct), on a real-time render thread with pose prediction | `Sources/XRealDesk/Renderer.swift`, `Compositor.swift` |
+| Display arrangement planning (checked over 1440 layouts) | `Sources/XRCore/Arrangement.swift` |
 
 The IMU protocol comes from the community reverse-engineering in
 [nrealAirLinuxDriver](https://gitlab.com/TheJackiMonster/nrealAirLinuxDriver). XRealDesk talks to the glasses directly and doesn't need the XREAL SDK or any driver.
@@ -121,7 +134,9 @@ The IMU protocol comes from the community reverse-engineering in
 
 ```sh
 swift build                                  # debug build
-swift run xrcheck testdata/air2pro-calibration.json   # self-checks (protocol, fusion, layout, projection)
+swift run xrcheck testdata/air2pro-calibration.json   # self-checks, plus adversarial robustness checks:
+                                             # 200k corrupt USB reports, corrupt calibration blobs, NaN/absurd
+                                             # sensor data, 5040 layouts, 1440 display arrangements
 swift run xrcheck live 20                    # stream live head tracking from connected glasses
 .build/debug/XRealDesk --preview             # render into a window instead of the glasses
 ```

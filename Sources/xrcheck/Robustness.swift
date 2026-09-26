@@ -292,6 +292,30 @@ func arrangementChecks() {
     let custom = Arrangement.gridOrigins(home: homes[0], count: 3, rows: 1, screenSize: sizes[0], placement: .custom,
                                          customOffsets: [1: CGPoint(x: 100, y: -900)])
     check(custom[1] == CGPoint(x: 100, y: -900) && custom.count == 3, "custom placement keeps your own positions")
+    // Screens added after saving a custom layout must not land on top of saved ones.
+    var customOverlaps = 0
+    var rng = SplitMix64(state: 7)
+    for _ in 0..<500 {
+        let count = Int.random(in: 1...8, using: &rng)
+        var offsets: [Int: CGPoint] = [:]
+        var placed: [CGRect] = [homes[0]]
+        for i in 0..<count where Bool.random(using: &rng) {
+            // A saved layout macOS accepted: non-overlapping positions around the laptop.
+            for _ in 0..<20 {
+                let p = CGPoint(x: CGFloat(Int.random(in: -4...3, using: &rng)) * 1600, y: CGFloat(Int.random(in: -3...1, using: &rng)) * 900 - 900)
+                let r = CGRect(origin: p, size: sizes[0])
+                if !placed.contains(where: { $0.intersection(r).width > 0.5 && $0.intersection(r).height > 0.5 }) {
+                    offsets[i] = p; placed.append(r); break
+                }
+            }
+        }
+        let rects = Arrangement.gridOrigins(home: homes[0], count: count, rows: 1, screenSize: sizes[0], placement: .custom,
+                                            customOffsets: offsets).map { CGRect(origin: $0, size: sizes[0]) }
+        let all = [homes[0]] + rects
+        for i in 0..<all.count { for j in (i + 1)..<all.count where all[i].intersection(all[j]).width > 0.5 && all[i].intersection(all[j]).height > 0.5 {
+            customOverlaps += 1 } }
+    }
+    check(customOverlaps == 0, "custom layouts with screens added later never overlap (\(customOverlaps) overlaps)")
     check(Arrangement.gridOrigins(home: homes[0], count: 0, rows: 0, screenSize: sizes[0], placement: .above).isEmpty,
           "zero screens: nothing to place (no crash)")
 }

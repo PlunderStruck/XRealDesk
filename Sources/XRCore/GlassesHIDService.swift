@@ -104,7 +104,8 @@ public final class GlassesHIDService: @unchecked Sendable {
     /// Drop and re-open the device (e.g. after system wake).
     /// Record raw IMU samples (device ns, gyro °/s xyz, accel g xyz; sensor axes) as CSV for
     /// `seconds`, for offline tuning with `xrcheck replay`. Head motion only, nothing else.
-    public func recordIMU(to url: URL, seconds: Double) {
+    public func recordIMU(to url: URL, seconds rawSeconds: Double) {
+        let seconds = rawSeconds.isFinite ? min(max(rawSeconds, 1), 3600) : 60   // "inf"/"nan" from a hook must not trap
         perform { [weak self] in
             guard let self else { return }
             FileManager.default.createFile(atPath: url.path, contents: Data("t_ns,gx,gy,gz,ax,ay,az\n".utf8))
@@ -375,7 +376,7 @@ public final class GlassesHIDService: @unchecked Sendable {
         if let h = recordHandle {
             recordBuffer += "\(s.timestampNs),\(s.gyro.x),\(s.gyro.y),\(s.gyro.z),\(s.accel.x),\(s.accel.y),\(s.accel.z)\n"
             if recordBuffer.utf8.count > 64_000 || now > recordUntil {
-                h.write(Data(recordBuffer.utf8)); recordBuffer = ""
+                try? h.write(contentsOf: Data(recordBuffer.utf8)); recordBuffer = ""
             }
             if now > recordUntil {
                 try? h.close(); recordHandle = nil

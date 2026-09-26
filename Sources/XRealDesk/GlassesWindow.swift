@@ -59,7 +59,12 @@ final class MetalHostView: NSView {
 
 
     /// Head-locked toast in the lower middle of the view.
+    /// A message shown until explicitly hidden (seconds: 0), e.g. "tracking lost". Brief messages
+    /// shown meanwhile return to it instead of hiding it.
+    private var stickyText: String?
+
     func showHUD(_ text: String, seconds: Double = 1.6) {
+        if seconds <= 0 { stickyText = text }
         hudHideWork?.cancel()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -72,12 +77,16 @@ final class MetalHostView: NSView {
         layoutHUD()
         CATransaction.commit()
         for (i, hud) in huds.enumerated() { hud.opacity = i == 0 || isSideBySide ? 1 : 0 }
-        let work = DispatchWorkItem { [weak self] in self?.hideHUD() }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if let sticky = self.stickyText { self.showHUD(sticky, seconds: 0) } else { self.hideHUD() }
+        }
         hudHideWork = work
         if seconds > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work) }
     }
 
     func hideHUD() {
+        stickyText = nil
         hudHideWork?.cancel()
         huds.forEach { $0.opacity = 0; $0.removeFromSuperlayer() }
     }

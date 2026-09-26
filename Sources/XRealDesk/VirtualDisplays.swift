@@ -53,11 +53,8 @@ final class VirtualDisplayManager {
             if ok {
                 modeSignature = mode
                 Log.info("Changed virtual displays to \(resolution.id)\(hiDPI ? " HiDPI" : "") @\(refreshRate)Hz in place")
-                if count > screens.count {
-                    for i in screens.count..<count { if let s = makeScreen(index: i) { screens.append(s) } }
-                } else if count < screens.count {
-                    screens.removeLast(screens.count - count)
-                }
+                addMissingScreens(upTo: count)
+                screens.removeAll { $0.index >= count }
                 return .remoded
             }
             Log.error("In-place mode change failed; recreating displays")
@@ -68,17 +65,27 @@ final class VirtualDisplayManager {
             self.hiDPI = hiDPI
             self.refreshRate = refreshRate
             modeSignature = mode
-            for i in 0..<count { if let s = makeScreen(index: i) { screens.append(s) } }
+            addMissingScreens(upTo: count)
             return .recreated
         }
-        guard count != screens.count else { return .unchanged }
-        if count > screens.count {
-            for i in screens.count..<count { if let s = makeScreen(index: i) { screens.append(s) } }
-        } else {
-            Log.info("Removing virtual displays \(count + 1)...\(screens.count)")
-            screens.removeLast(screens.count - count)
+        let wanted = Set(0..<count)
+        guard Set(screens.map(\.index)) != wanted else { return .unchanged }
+        if screens.contains(where: { $0.index >= count }) {
+            Log.info("Removing virtual displays \(count + 1)...")
+            screens.removeAll { $0.index >= count }
         }
+        addMissingScreens(upTo: count)
         return .resized
+    }
+
+    /// Creates every screen slot below `count` that doesn't exist yet (e.g. one whose creation failed
+    /// earlier), keeping slots unique and in order.
+    private func addMissingScreens(upTo count: Int) {
+        let have = Set(screens.map(\.index))
+        for i in 0..<count where !have.contains(i) {
+            if let s = makeScreen(index: i) { screens.append(s) }
+        }
+        screens.sort { $0.index < $1.index }
     }
 
     private func makeScreen(index i: Int) -> Screen? {

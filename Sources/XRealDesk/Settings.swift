@@ -175,6 +175,8 @@ final class Settings: ObservableObject {
     @Published var showHUD: Bool { didSet { d.set(showHUD, forKey: "showHUD") } }
     /// On quit, set the glasses to mirror the main screen (their normal state without XRealDesk).
     @Published var mirrorWhenQuitting: Bool { didSet { d.set(mirrorWhenQuitting, forKey: "mirrorWhenQuitting") } }
+    /// Full diagnostic log on disk (frame timing, tracking health, events). Off: errors only.
+    @Published var diagnosticLog: Bool { didSet { d.set(diagnosticLog, forKey: "diagnosticLog"); Log.diagnostics = diagnosticLog } }
     /// Seconds after the glasses come off before your windows move to the Mac (and back when you
     /// put them on). < 0 = never.
     @Published var glassesOffMoveDelay: Double { didSet { d.set(glassesOffMoveDelay, forKey: "glassesOffMoveDelay") } }
@@ -195,7 +197,7 @@ final class Settings: ObservableObject {
             "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
             "predictionMs": 14.0, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
             "sharpen": 0.35, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
-            "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "glassesOffMoveDelay": 10.0, "showInDock": true,
+            "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "glassesOffMoveDelay": 10.0, "diagnosticLog": false, "showInDock": true,
         ])
         screenCount = min(max(d.integer(forKey: "screenCount"), 1), Settings.maxScreens)
         rows = min(max(d.integer(forKey: "rows"), 1), 3)
@@ -236,6 +238,8 @@ final class Settings: ObservableObject {
         showHUD = d.bool(forKey: "showHUD")
         mirrorWhenQuitting = d.bool(forKey: "mirrorWhenQuitting")
         glassesOffMoveDelay = d.double(forKey: "glassesOffMoveDelay")
+        diagnosticLog = d.bool(forKey: "diagnosticLog")
+        Log.diagnostics = d.bool(forKey: "diagnosticLog")
         showInDock = d.bool(forKey: "showInDock")
     }
 

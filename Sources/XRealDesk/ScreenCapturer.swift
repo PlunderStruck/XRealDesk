@@ -45,6 +45,9 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         var wantRunning = false
         var generation = 0
         var restartCount = 0
+        var config: SCStreamConfiguration?
+        /// Near your view: full frame rate. Otherwise a trickle (see setActive).
+        var active = true
     }
     private let control = OSAllocatedUnfairLock<Control>(initialState: Control())
 
@@ -81,6 +84,26 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         Task { await self.startStream(generation: gen, attempt: 0) }
     }
 
+    /// Screens you aren't looking at are captured at 10 fps instead of up to 120: capturing is work
+    /// for WindowServer, the process that also puts every frame on the glasses. The renderer switches
+    /// a screen back to full rate well before it comes into view.
+    func setActive(_ on: Bool) {
+        let (stream, cfg) = control.withLock { c -> (SCStream?, SCStreamConfiguration?) in
+            guard c.active != on else { return (nil, nil) }
+            c.active = on
+            return (c.stream, c.config)
+        }
+        guard let stream, let cfg else { return }
+        cfg.minimumFrameInterval = frameInterval(active: on)
+        stream.updateConfiguration(cfg) { [index] error in
+            if let error { Log.error("Screen \(index + 1): changing capture rate failed: \(error.localizedDescription)") }
+        }
+    }
+
+    private func frameInterval(active: Bool) -> CMTime {
+        CMTime(value: 1, timescale: CMTimeScale(active ? max(30, refreshRate) : 10))
+    }
+
     func stop() {
         let s = control.withLock { c -> SCStream? in
             c.wantRunning = false
@@ -112,7 +135,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             let cfg = SCStreamConfiguration()
             cfg.width = Int(pixel.width)
             cfg.height = Int(pixel.height)
-            cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(30, refreshRate)))
+            cfg.minimumFrameInterval = frameInterval(active: control.withLock { $0.active })
             cfg.pixelFormat = kCVPixelFormatType_32BGRA
             cfg.colorSpaceName = CGColorSpace.sRGB
             cfg.queueDepth = 5
@@ -128,6 +151,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             let installed = control.withLock { c -> Bool in
                 guard c.wantRunning && c.generation == gen else { return false }
                 c.stream = s
+                c.config = cfg
+                c.restartCount = 0   // running again: the next hiccup retries quickly
                 return true
             }
             guard installed else { try? await s.stopCapture(); return }

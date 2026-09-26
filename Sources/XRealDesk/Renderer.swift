@@ -196,9 +196,14 @@ final class Renderer {
         let w = image.width, h = image.height
         var bytes = [UInt8](repeating: 0, count: w * h * 4)
         let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: info) else { return }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        // The context may only use the buffer while it's pinned.
+        let drawn = bytes.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: info) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { return }
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: w, height: h, mipmapped: true)
         td.usage = [.shaderRead, .pixelFormatView]
         guard let tex = device.makeTexture(descriptor: td), let cb = queue.makeCommandBuffer(),
@@ -868,7 +873,7 @@ final class Renderer {
             } else {
                 float2 g = abs(fract(uv * float2(16.0, 9.0)) - 0.5);
                 float line = 1.0 - smoothstep(0.46, 0.5, max(g.x, g.y));
-                color = mix(float3(0.35, 0.36, 0.40), float3(0.25, 0.26, 0.28), line);
+                color = mix(float3(0.35, 0.37, 0.40), float3(0.25, 0.26, 0.28), line);   // gamma values of the old placeholder
             }
             if (p.hasCursor > 0.5) {
                 float2 rs = p.cursorRect.zw - p.cursorRect.xy;
@@ -878,11 +883,12 @@ final class Renderer {
                     color = cc.rgb + color * (1.0 - cc.a);
                 }
             }
-            color *= (1.0 - p.dim);
-            // Accent ring on the screen that has the cursor (~1.5 px).
-            float ring = smoothstep(-2.5 * aa, -1.5 * aa, dist);
-            color = mix(color, float3(0.58, 0.72, 1.0), ring * p.highlight * 0.85);
-            return float4(toLinear(color) * alpha, 1.0);
+            // Dimming and the accent ring in linear light, exactly like the two-pass renderer
+            // (dimming in gamma space came out far darker at the same setting).
+            float3 lin = toLinear(color) * (1.0 - p.dim);
+            float ring = smoothstep(-2.5 * aa, -1.5 * aa, dist);   // ~1.5 px, on the screen with the cursor
+            lin = mix(lin, float3(0.30, 0.62, 1.0), ring * p.highlight * 0.85);
+            return float4(lin * alpha, 1.0);
         }
         return float4(0.0, 0.0, 0.0, 1.0);
     }

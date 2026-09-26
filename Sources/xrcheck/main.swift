@@ -437,6 +437,7 @@ func replay(csv: String, calibrationPath: String) {
         let v = f[1...].compactMap { Float($0) }
         guard v.count == 6 else { continue }
         if t0 == 0 { t0 = ns }
+        guard ns >= t0, t.last.map({ Double(ns - t0) / 1e9 > $0 }) ?? true else { continue }   // skip out-of-order rows
         let raw = XRealProtocol.RawIMUSample(timestampNs: ns, gyro: SIMD3(v[0], v[1], v[2]), accel: SIMD3(v[3], v[4], v[5]), temperatureC: 30)
         let (g, a) = cal.correct(raw)
         t.append(Double(ns - t0) / 1e9); gy.append(g); ac.append(a)
@@ -548,7 +549,7 @@ func replay(csv: String, calibrationPath: String) {
             R += frame
         }
         var swim: [Float] = [], shim: [Float] = [], turn: [Float] = []
-        for k in 1..<errs.count {
+        for k in 1..<max(errs.count, 1) {
             if working[k] && working[k - 1] {
                 swim.append(simd_length(errs[k])); shim.append(simd_length(errs[k] - errs[k - 1]))
             } else if !working[k] {
@@ -556,7 +557,7 @@ func replay(csv: String, calibrationPath: String) {
             }
         }
         let rms: ([Float]) -> Float = { a in sqrt(a.map { $0 * $0 }.reduce(0, +) / Float(max(a.count, 1))) }
-        let p95 = swim.sorted()[min(swim.count - 1, Int(Float(swim.count) * 0.95))]
+        let p95 = swim.isEmpty ? 0 : swim.sorted()[min(swim.count - 1, Int(Float(swim.count) * 0.95))]
         let tp95 = turn.isEmpty ? 0 : turn.sorted()[min(turn.count - 1, Int(Float(turn.count) * 0.95))]
         // Stop bounce: after a turn (≥ 30°/s) ends (< 5°/s), how far the view overshoots in the
         // direction of travel over the next 200 ms (positive = ran past where the head stopped).

@@ -129,6 +129,7 @@ struct SettingsView: View {
                 Toggle("Messages in the glasses (recentered, size, …)", isOn: $settings.showHUD)
                 Toggle("Keyboard shortcuts (⌃⌥ + key)", isOn: $settings.hotkeysEnabled)
                 Toggle("Switch the glasses to extended while XRealDesk runs (needed to show your screens)", isOn: $settings.autoExtendDisplay)
+                Toggle("Diagnostic log (for troubleshooting; otherwise only errors are saved)", isOn: $settings.diagnosticLog)
             }
         }
         .formStyle(.grouped)
