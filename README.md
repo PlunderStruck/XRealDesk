@@ -95,6 +95,10 @@ which gives the smoothest text at some GPU cost. **Text sharpening** helps when 
 - **"Glasses display not detected".** The cable or port isn't carrying video. Use a USB-C port directly on the Mac and the glasses' own cable.
 - **Screens are black or show a grid.** Screen Recording permission is missing, or macOS needs a relaunch after granting it (Settings has a Relaunch button).
 - **Screens drift slowly.** Press ⌃⌥R. Drift correction learns your headset's gyro bias whenever you hold still, and remembers it per headset.
+- **The picture split in two / went to 60 Hz.** Holding brightness-up for ~3 s puts the glasses in their
+  side-by-side 3D mode. XRealDesk keeps working and shows the same flat picture to both eyes, but 2D
+  runs at 120 Hz and feels smoother. Hold the button again to go back. (Per-eye depth exists as an
+  experiment, `com.xrealdesk.set depth=1`; with rotation-only tracking it felt warpy on head turns.)
 - **Screens lag or overshoot when you turn fast.** Adjust **Prediction** in Settings → Tracking.
 - **Log:** ~/Library/Logs/XRealDesk.log (menu → Show Log). **Save Glasses Snapshot** writes what the glasses show to ~/Library/Logs/XRealDesk/snapshot.png.
 

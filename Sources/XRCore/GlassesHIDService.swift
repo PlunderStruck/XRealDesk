@@ -34,7 +34,10 @@ public final class GlassesHIDService: @unchecked Sendable {
         public static let predictionCap: Float = 1.5
 
         /// Extrapolates to `time` (same clock as hostTime) along the current rotation.
-        public func predicted(to time: TimeInterval, maxAhead: Double = 0.05) -> simd_quatf {
+        /// Longest prediction. Must cover the whole display pipeline: ~39 ms at 120 Hz, ~68 ms at
+        /// 60 Hz (side-by-side 3D), where a lower cap left the screens trailing every turn.
+        public static let maxAhead = 0.08
+        public func predicted(to time: TimeInterval, maxAhead: Double = Pose.maxAhead) -> simd_quatf {
             let dt = Float(min(max(time - hostTime, 0), maxAhead))
             let speed = simd_length(angularVelocity)
             // Tuned on recorded head motion (typing + turning): always predict, but never more

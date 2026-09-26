@@ -6,21 +6,25 @@ import QuartzCore
 /// paced by the display the layer is on (the glasses: up to 120 Hz).
 final class MetalHostView: NSView {
     let metalLayer = CAMetalLayer()
-    private let hud = CATextLayer()
+    /// Two copies so the toast shows in both eyes' halves in side-by-side 3D (one used in 2D).
+    private let huds = [CATextLayer(), CATextLayer()]
+    private var hud: CATextLayer { huds[0] }
     private var hudHideWork: DispatchWorkItem?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layerContentsRedrawPolicy = .never
-        hud.alignmentMode = .center
-        hud.foregroundColor = NSColor.white.cgColor
-        hud.backgroundColor = NSColor(white: 0.12, alpha: 0.92).cgColor
-        hud.cornerRadius = 10
-        hud.font = NSFont.systemFont(ofSize: 22, weight: .medium)
-        hud.fontSize = 22
-        hud.opacity = 0
-        hud.isWrapped = true
+        for hud in huds {
+            hud.alignmentMode = .center
+            hud.foregroundColor = NSColor.white.cgColor
+            hud.backgroundColor = NSColor(white: 0.12, alpha: 0.92).cgColor
+            hud.cornerRadius = 10
+            hud.font = NSFont.systemFont(ofSize: 22, weight: .medium)
+            hud.fontSize = 22
+            hud.opacity = 0
+            hud.isWrapped = true
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -32,12 +36,8 @@ final class MetalHostView: NSView {
         metalLayer.maximumDrawableCount = 3
         metalLayer.displaySyncEnabled = true
         metalLayer.backgroundColor = NSColor.black.cgColor
+        metalLayer.isOpaque = true
         return metalLayer
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if hud.superlayer == nil { layer?.addSublayer(hud) }
     }
 
     override func viewDidChangeBackingProperties() {
@@ -63,26 +63,39 @@ final class MetalHostView: NSView {
         hudHideWork?.cancel()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        hud.string = text
-        hud.contentsScale = window?.backingScaleFactor ?? 2
+        // Attached only while showing, so the window is otherwise a single opaque Metal layer.
+        for hud in huds where hud.superlayer == nil { layer?.addSublayer(hud) }
+        for hud in huds {
+            hud.string = text
+            hud.contentsScale = window?.backingScaleFactor ?? 2
+        }
         layoutHUD()
         CATransaction.commit()
-        hud.opacity = 1
-        let work = DispatchWorkItem { [weak self] in self?.hud.opacity = 0 }
+        for (i, hud) in huds.enumerated() { hud.opacity = i == 0 || isSideBySide ? 1 : 0 }
+        let work = DispatchWorkItem { [weak self] in self?.hideHUD() }
         hudHideWork = work
         if seconds > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work) }
     }
 
     func hideHUD() {
         hudHideWork?.cancel()
-        hud.opacity = 0
+        huds.forEach { $0.opacity = 0; $0.removeFromSuperlayer() }
     }
+
+    /// The glasses are in side-by-side 3D (3840x1080): each half of the view goes to one eye.
+    var isSideBySide: Bool { bounds.width > bounds.height * 2.5 }
 
     private func layoutHUD() {
         let text = (hud.string as? String) ?? ""
-        let w = min(bounds.width * 0.6, max(260, CGFloat(text.count) * 12 + 40))
+        let halves: CGFloat = isSideBySide ? 2 : 1
+        let eyeWidth = bounds.width / halves
+        let w = min(eyeWidth * 0.6, max(260, CGFloat(text.count) * 12 + 40))
         let h: CGFloat = text.contains("\n") ? 76 : 44
-        hud.frame = CGRect(x: (bounds.width - w) / 2, y: bounds.height * 0.18, width: w, height: h)
+        for (i, hud) in huds.enumerated() {
+            let half = min(CGFloat(i), halves - 1)
+            hud.frame = CGRect(x: half * eyeWidth + (eyeWidth - w) / 2, y: bounds.height * 0.18, width: w, height: h)
+        }
+        if !isSideBySide { huds[1].opacity = 0 }
     }
 }
 

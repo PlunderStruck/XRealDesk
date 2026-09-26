@@ -54,6 +54,22 @@ public struct GlassesCalibration: Sendable {
         return ipd / (2 * tan(toeIn / 2))
     }
 
+    /// Head frame → eye `i`'s display frame (0 = left, 1 = right) for side-by-side 3D.
+    ///
+    /// Deliberately symmetric: each eye sits half the factory eye separation off centre and its
+    /// display is turned inward to meet at the factory convergence distance. Both eyes otherwise
+    /// use the same (average) intrinsics and lens map as 2D. The per-eye extrinsics in the blob
+    /// did not match its own left/right naming on a real Air 2 Pro (the left half of the picture
+    /// reaches the left eye, verified by eye test, yet the "left" values only looked right
+    /// swapped), and using them produced a warp on every head turn.
+    public func eyeView(_ i: Int) -> simd_float4x4 {
+        let side: Float = i == 0 ? -1 : 1
+        let ipd = eyes.count == 2 ? simd_length(eyes[1].offset - eyes[0].offset) : 0.063
+        let toeIn = atan(ipd / 2 / (convergenceDistance ?? 3.6))
+        return simd_float4x4(SpatialMath.rotationY(side * toeIn).inverse)
+            * SpatialMath.translation(SIMD3(-side * ipd / 2, 0, 0))
+    }
+
     public init() {}
 
     public static func headFromRaw(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(-v.x, v.z, v.y) }

@@ -63,6 +63,42 @@ func unitChecks() {
             } else { check(false, "displays converge in front of you") }
             let tilt = SpatialMath.degrees(cal.eyes[0].rotation.angle)
             check(tilt < 3, String(format: "left display rotation small (%.2f°)", tilt))
+            if ProcessInfo.processInfo.environment["XR_EYES"] != nil {
+                let mid = simd_slerp(cal.eyes[0].rotation, cal.eyes[1].rotation, 0.5)
+                for (i, e) in cal.eyes.enumerated() {
+                    let r = mid.inverse * e.rotation
+                    let f = r.act(SIMD3<Float>(0, 0, -1)), up = r.act(SIMD3<Float>(0, 1, 0))
+                    print(String(format: "  eye %d: offset (%.1f, %.1f, %.1f) mm, yaw %.3f° pitch %.3f° roll %.3f°, focal (%.1f, %.1f) center (%.1f, %.1f), abs rot %.2f°",
+                                 i, e.offset.x * 1000, e.offset.y * 1000, e.offset.z * 1000,
+                                 SpatialMath.degrees(atan2(-f.x, -f.z)), SpatialMath.degrees(asin(f.y)), SpatialMath.degrees(atan2(-up.x, up.y)),
+                                 e.focal.x, e.focal.y, e.center.x, e.center.y, SpatialMath.degrees(e.rotation.angle)))
+                }
+                for (i, e) in cal.eyes.enumerated() {
+                    guard let g = e.distortion else { continue }
+                    for (u, v) in [(960, 540), (200, 540), (1720, 540), (960, 100), (960, 980)] as [(Float, Float)] {
+                        let m = g.sample(u, v)
+                        print(String(format: "  eye %d lens map: display (%4.0f, %4.0f) → ideal (%7.1f, %7.1f)  shift (%+6.1f, %+6.1f)",
+                                     i, u, v, m.x, m.y, m.x - u, m.y - v))
+                    }
+                }
+                print(String(format: "  average: focal (%.1f, %.1f) center (%.1f, %.1f)", cal.focalX, cal.focalY, cal.centerX, cal.centerY))
+            }
+            // Side-by-side 3D: a point straight ahead lands where each eye's display should show it.
+            func imageX(_ eye: Int, _ d: Float) -> Float {
+                let p = cal.eyeView(eye) * SIMD4<Float>(0, 0, -d, 1)
+                return cal.focalX * (p.x / -p.z) + cal.centerX
+            }
+            func disparity(_ d: Float) -> Float {   // + = crossed (nearer than the displays' convergence)
+                imageX(0, d) - imageX(1, d)
+            }
+            if let conv = cal.convergenceDistance {
+                check(abs(disparity(conv)) < 0.5, String(format: "3D: no disparity at the convergence distance (%.2f px)", disparity(conv)))
+                let ipd = simd_length(cal.eyes[1].offset - cal.eyes[0].offset)
+                let expected = cal.eyes[0].focal.x * ipd * (1 / 1.5 - 1 / conv)
+                check(disparity(1.5) > 0 && abs(disparity(1.5) - expected) < 2,
+                      String(format: "3D: screens at 1.5 m get %.1f px of depth disparity (expected %.1f)", disparity(1.5), expected))
+                check(disparity(100) < 0, "3D: far away points sit behind the convergence plane")
+            }
         }
         if let g = cal.distortion {
             check(g.us.count == 32 && g.vs.count == 18, "lens distortion grid 32×18 parsed")
@@ -207,7 +243,7 @@ func unitChecks() {
         let still = GlassesHIDService.Pose(orientation: q, angularVelocity: SIMD3(0, SpatialMath.radians(0.8), 0), hostTime: 0,
                                            isStill: true, warmedUp: true, recentRotation: 0)
         check(still.predicted(to: 0.03).angle < 1e-6, "no prediction when the head hasn't moved")
-        check(near(deg(turn.predicted(to: 1.0).angle), 5.0, 0.01), "prediction horizon capped at 50 ms")
+        check(near(deg(turn.predicted(to: 1.0).angle), 8.0, 0.01), "prediction horizon capped at 80 ms (covers 60 Hz 3D)")
     }
 
     print("layout")
@@ -443,7 +479,13 @@ func replay(csv: String, calibrationPath: String) {
         .init(name: "always, vel 8ms, cap 1.5x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.5),
         .init(name: "always, vel 12ms, cap 1.2x", fadeStart: 0, fadeFull: 0.001, velTau: 0.012, leash: 0.03, clamp: 1.2),
     ]
-    let frame = 1.0 / 120, ahead = 2 * frame + 0.014   // display-link latency + glasses' own delay
+    // Display timing: macOS shows a frame 3 refreshes after the display link asks for it, then the
+    // app adds its tuned lead, plus half a frame beyond 120 Hz's (see Compositor). XR_FPS / XR_MAXAHEAD override.
+    let env = ProcessInfo.processInfo.environment
+    let fps = Double(env["XR_FPS"] ?? "") ?? 120
+    let maxAhead = Double(env["XR_MAXAHEAD"] ?? "") ?? GlassesHIDService.Pose.maxAhead
+    let frame = 1.0 / fps, ahead = 3 * frame + 0.014 + max(0, 0.5 / fps - 0.5 / 120)
+    print(String(format: "display %.0f Hz, rendering %.1f ms ahead, prediction capped at %.0f ms", fps, ahead * 1000, maxAhead * 1000))
     print("                                     |   WORKING (<10°/s)                   |  TURNING (≥10°/s)")
     print("config                               | swim rms   p95    | shimmer rms  max | swim rms   p95")
     for c in configs {
@@ -461,7 +503,7 @@ func replay(csv: String, calibrationPath: String) {
                 let dt = velIdx > 0 ? t[velIdx] - t[velIdx - 1] : 0.001
                 vel += (w[velIdx] - vel) * Float(min(1, dt / c.velTau)); velIdx += 1
             }
-            let horizon = Float(min(R + ahead - t[i], 0.05))
+            let horizon = Float(min(R + ahead - t[i], maxAhead))
             let speed = simd_length(vel)
             let x = min(max((speed - SpatialMath.radians(c.fadeStart)) / (SpatialMath.radians(c.fadeFull) - SpatialMath.radians(c.fadeStart)), 0), 1)
             var gain = x * x * (3 - 2 * x)
@@ -477,7 +519,7 @@ func replay(csv: String, calibrationPath: String) {
                 let d = pastQ.inverse * q[i]
                 let pose = GlassesHIDService.Pose(orientation: q[i], angularVelocity: vel, hostTime: t[i], isStill: false,
                                                   warmedUp: true, recentRotation: 2 * acos(min(1, abs(d.real))))
-                let rendered = st.update(head: pose.predicted(to: R + ahead), angularSpeed: speed, dt: Float(frame))
+                let rendered = st.update(head: pose.predicted(to: R + ahead, maxAhead: maxAhead), angularSpeed: speed, dt: Float(frame))
                 let truth = q[sampleIndex(at: R + ahead)]
                 let trueSpeed = simd_length(w[sampleIndex(at: R + ahead)])
                 let (ry, rp) = SpatialMath.yawPitch(of: rendered), (ty, tp) = SpatialMath.yawPitch(of: truth)

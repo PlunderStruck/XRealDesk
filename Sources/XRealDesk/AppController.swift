@@ -48,6 +48,8 @@ final class AppController: ObservableObject {
     private let virtualDisplays = VirtualDisplayManager()
     private var captures: [DisplayCapture] = []
     private var window: GlassesWindow?
+    /// Side-by-side 3D with real depth (experimental; the flat picture felt better on the Air 2 Pro).
+    private var stereoDepth = false
     private var renderer: Renderer?
     private let cursor = CursorController()
     private let windows = WindowKeeper()
@@ -187,6 +189,10 @@ final class AppController: ObservableObject {
             case "hidpi": self.settings.hiDPI = v == "1"
 
             case "sharpen": if let x = Double(v) { self.settings.sharpen = x }
+            case "distance": if let x = Double(v) { self.settings.screenDistance = min(max(x, 0.5), 10) }
+            case "depth":   // side-by-side 3D: 1 = real depth, 0 = the same flat picture in both eyes (default)
+                self.stereoDepth = v == "1"
+                self.pushConfig()
             default: Log.info("Unknown set command \(arg)")
             }
         }
@@ -936,6 +942,7 @@ final class AppController: ObservableObject {
         c.flickSensitivity = Float(settings.flickSensitivity)
         c.smartFlick = settings.smartFlick
         c.rollRadians = SpatialMath.radians(Float(settings.rollDegrees))
+        c.flat3D = !stereoDepth
         c.preview = preview
         return c
     }

@@ -157,6 +157,8 @@ final class Settings: ObservableObject {
     @Published var smartFlick: Bool { didSet { d.set(smartFlick, forKey: "smartFlick") } }
     /// Rotates the picture clockwise (+) / counter-clockwise (−) to match how the glasses sit on your face.
     @Published var rollDegrees: Double { didSet { d.set(rollDegrees, forKey: "rollDegrees") } }
+    /// How far away the screens sit (m). Only noticeable in 3D: their size stays the same.
+    @Published var screenDistance: Double { didSet { d.set(screenDistance, forKey: "screenDistance") } }
 
     // Look
     @Published var sharpen: Double { didSet { d.set(sharpen, forKey: "sharpen") } }
@@ -192,7 +194,7 @@ final class Settings: ObservableObject {
             "refreshRate": 60, "glassesIsMain": false,
             "screenWidthDegrees": 33.0, "gapDegrees": 1.5, "curve": 0.55, "tiltDegrees": 0.0,
             "trackingMode": TrackingMode.anchored.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
-            "predictionMs": 14.0, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0,
+            "predictionMs": 14.0, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
             "sharpen": 0.35, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
             "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "showInDock": true,
         ])
@@ -222,6 +224,7 @@ final class Settings: ObservableObject {
         flickSensitivity = d.double(forKey: "flickSensitivity")
         smartFlick = d.bool(forKey: "smartFlick")
         rollDegrees = d.double(forKey: "rollDegrees")
+        screenDistance = min(max(d.double(forKey: "screenDistance"), 0.5), 10)
         sharpen = d.double(forKey: "sharpen")
         focusDim = d.double(forKey: "focusDim")
         brightness = d.double(forKey: "brightness")
@@ -242,7 +245,7 @@ final class Settings: ObservableObject {
     func layout() -> ScreenLayout {
         ScreenLayout(count: screenCount, rows: rows, widthDegrees: Float(screenWidthDegrees),
                      aspect: resolution.aspect, gapDegrees: Float(gapDegrees), curve: Float(curve),
-                     tiltDegrees: Float(tiltDegrees))
+                     tiltDegrees: Float(tiltDegrees), distance: Float(screenDistance))
     }
 
     func apply(_ p: LayoutPreset) {

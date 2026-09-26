@@ -26,6 +26,9 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         var smartFlick = false
         /// Picture rotation to match how the glasses sit on your face (+ = clockwise).
         var rollRadians: Float = 0
+        /// Side-by-side output but the same flat picture in both eyes (no depth). Default: depth felt
+        /// warpy on head turns (60 Hz, rotation-only tracking) while the flat picture felt clean.
+        var flat3D = true
         var preview = false
     }
 
@@ -95,6 +98,11 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
     private var statsSeconds = 0
     private var smart = SmartFollow()
     private var distortionInstalled = false
+    private var lastStereo = false
+    /// Neck pivot → midpoint between the eyes, head frame (m): the usual neck model (eyes ~7.5 cm
+    /// above and ~8 cm in front of the pivot the head turns about).
+    static let neckToEyes = SIMD3<Float>(0, 0.075, -0.08)
+    private var horizonSum = 0.0, horizonN = 0, presentSum = 0.0, deadlineSum = 0.0
     // Frame-timing diagnostics (render thread).
     private var lastTarget: CFTimeInterval = 0
     private var missedVsyncs = 0
@@ -163,6 +171,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         let link = CAMetalDisplayLink(metalLayer: layer)
         link.delegate = self
         link.preferredFrameRateRange = CAFrameRateRange(minimum: targetFPS, maximum: targetFPS, preferred: targetFPS)
+        // macOS shows each frame 3 refreshes after this callback either way (measured: 25 ms at
+        // 120 Hz, 50 ms at 60 Hz, for latency 1 or 2), so the head prediction covers that instead.
         link.preferredFrameLatency = 2
         link.add(to: .current, forMode: .default)
         Log.info("Render thread started")
@@ -194,7 +204,11 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
             maxTargetGapMs = max(maxTargetGapMs, gap * 1000)
         }
         lastTarget = presentAt
-        let target = presentAt + cfg.predictionSeconds
+        // Predict to the middle of the frame's time on screen: the tuned lead was measured at 120 Hz,
+        // and a 60 Hz frame stays up twice as long.
+        let target = presentAt + cfg.predictionSeconds + max(0, 0.5 / Double(targetFPS) - 0.5 / 120)
+        horizonSum += target - now; horizonN += 1
+        presentSum += presentAt - now; deadlineSum += update.targetTimestamp - now
         var head = lastHead
         var tracking = false
         var headSpeed: Float = 0
@@ -302,7 +316,30 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
             renderer.setDistortion(average: wantMap ? cal.distortion : nil, left: nil, right: nil, calibrated: cal.resolution)
             distortionInstalled = wantMap
         }
-        let eyes = [Renderer.EyeView(intrinsics: intrinsics, view: simd_float4x4(viewRot), map: 0)]
+        // Side-by-side 3D (the glasses' button switches the display to 3840x1080): by default the same
+        // flat picture in both halves; with depth on (`set depth=1`), one view per eye.
+        let size = update.drawable.texture
+        let stereo = !cfg.preview && cal.eyes.count == 2 && size.width * 10 > size.height * 25
+        let eyes: [Renderer.EyeView]
+        if stereo && cfg.flat3D {
+            let flat = Renderer.EyeView(intrinsics: intrinsics, view: simd_float4x4(viewRot), map: 0)
+            eyes = [flat, flat]
+        } else if stereo {
+            // Neck model: heads turn and tilt about the neck, so the eyes also move a few cm. Without
+            // this, stereo screens at 1.5 m swim against the real world on every turn or tilt.
+            let neck = Compositor.neckToEyes
+            let headView = SpatialMath.translation(-neck) * simd_float4x4(viewRot) * SpatialMath.translation(neck)
+            // Left half of the picture → left eye (verified with an eye test).
+            eyes = (0..<2).map { i in
+                Renderer.EyeView(intrinsics: intrinsics, view: cal.eyeView(i) * headView, map: 0)
+            }
+        } else {
+            eyes = [Renderer.EyeView(intrinsics: intrinsics, view: simd_float4x4(viewRot), map: 0)]
+        }
+        if stereo != lastStereo {
+            lastStereo = stereo
+            Log.info(stereo ? "3D side-by-side: \(cfg.flat3D ? "same flat picture in both eyes" : "one view per eye")" : "2D: rendering a single view")
+        }
 
         // Per-panel look: brightness, eased focus dimming, cursor ring.
         let captures = capturesLock.withLock { $0 }
@@ -356,11 +393,13 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
             if statsSeconds % 10 == 0 {
                 let st = renderer.takeStats()
                 let gpuTimes = renderer.takeGPUTimes()
-                Log.info(String(format: "Frames: %.0f fps (render thread), rendered %d, skipped busy %d, missed vsyncs %d, max frame gap %.1f ms, max pose age %.1f ms, max head step %.2f°, jitter rms %.4f° max %.3f°, GPU %.2f ms avg / %.2f ms max (%.1fx%@), IMU %.0f Hz",
+                Log.info(String(format: "Frames: %.0f fps (render thread), rendered %d, skipped busy %d, missed vsyncs %d, max frame gap %.1f ms, max pose age %.1f ms, max head step %.2f°, jitter rms %.4f° max %.3f°, GPU %.2f ms avg / %.2f ms max (%.1fx%@), IMU %.0f Hz, predicting %.1f ms ahead (shown in %.1f ms, deadline %.1f ms)",
                                 fps!, st.rendered, st.skippedBusy, missedVsyncs, maxTargetGapMs, maxPoseAgeMs, maxHeadStepDeg,
                                 sqrt(jitterSum / Double(max(jitterN, 1))), jitterMax,
                                 gpuTimes.avg, gpuTimes.max, cfg.style.supersample, cfg.style.lensCorrection ? ", lens corrected" : "",
-                                hid.sampleRate))
+                                hid.sampleRate, horizonSum / Double(max(horizonN, 1)) * 1000,
+                                presentSum / Double(max(horizonN, 1)) * 1000, deadlineSum / Double(max(horizonN, 1)) * 1000))
+                horizonSum = 0; horizonN = 0; presentSum = 0; deadlineSum = 0
                 jitterSum = 0; jitterN = 0; jitterMax = 0
                 if quietN > 120 {
                     let rawRMS = sqrt(quietRawSum / Double(quietN)), stabRMS = sqrt(quietStabSum / Double(quietN))
