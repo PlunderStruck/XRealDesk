@@ -197,6 +197,11 @@ final class AppController: ObservableObject {
             case "hidpi": self.settings.hiDPI = v == "1"
 
             case "sharpen": if let x = Double(v) { self.settings.sharpen = x }
+            case "pause":   // diagnostics: stop drawing and capturing (1) / resume (0)
+                if v == "1" { self.compositor?.stop(); self.stopCaptures() } else {
+                    if let w = self.window { self.compositor?.start(fps: w.screen?.maximumFramesPerSecond ?? 120) }
+                    self.syncCaptures(restartAll: false)
+                }
             case "distance": if let x = Double(v) { self.settings.screenDistance = min(max(x, 0.5), 10) }
             case "depth":   // side-by-side 3D: 1 = real depth, 0 = the same flat picture in both eyes (default)
                 self.stereoDepth = v == "1"
