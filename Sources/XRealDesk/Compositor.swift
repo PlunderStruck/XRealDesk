@@ -547,7 +547,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
                                           s.gapMax * 1000, shown, (captureToGlassesSum[i] ?? 0) / Double(max(shown, 1)) * 1000,
                                           unshownCaptures[i] ?? 0))
                 }
-                Log.info("Capture: " + capture.joined(separator: "; ") + String(format: "; %d unchanged frames skipped", unchangedFrames))
+                Log.info("Capture: " + capture.joined(separator: "; ") + String(format: "; %d unchanged frames skipped", unchangedFrames)
+                         + (TypingLatency.report().map { "; " + $0 } ?? ""))
                 captureShown = [:]; captureToGlassesSum = [:]; unshownCaptures = [:]; unchangedFrames = 0
                 jitterSum = 0; jitterN = 0; jitterMax = 0
                 if quietN > 120 {

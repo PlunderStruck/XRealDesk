@@ -379,6 +379,15 @@ public enum RendererShaders {
         return float3(red, green, blue);
     }
 
+    // While the picture moves across the display the eye can't resolve fine detail, and sharp
+    // filters make edges crawl: a soft 4-tap box over the pixel's footprint (each bilinear tap
+    // averages 2x2 texels) looks calm and costs a tenth of the still-picture filter.
+    float3 shadeMoving(texture2d<float> tex, sampler smp, float2 uv, float2 duvx, float2 duvy) {
+        float2 a = 0.25 * (duvx + duvy), b = 0.25 * (duvx - duvy);
+        return 0.25 * (tex.sample(smp, clamp(uv + a, 0.0, 1.0), level(0)).rgb + tex.sample(smp, clamp(uv - a, 0.0, 1.0), level(0)).rgb
+                     + tex.sample(smp, clamp(uv + b, 0.0, 1.0), level(0)).rgb + tex.sample(smp, clamp(uv - b, 0.0, 1.0), level(0)).rgb);
+    }
+
     // Contrast-adaptive sharpening (the idea behind AMD FidelityFX CAS): sharpen by how much room the
     // neighbourhood leaves, so soft edges get crisper while already-crisp edges and flat areas are
     // left alone: no halos, no crunch. `c` is this pixel's (subpixel-rendered) color; the four
@@ -438,7 +447,8 @@ public enum RendererShaders {
                         sharp = shadeScreen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, u.sharpen, u.quality);
                     }
                 }
-                if (u.motion > 0.001) calm = shadeScreen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, 0.0, u.quality);
+                if (u.motion > 0.001) calm = u.quality < 1.25 ? shadeScreen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, 0.0, u.quality)
+                                                              : shadeMoving(screens[i], smp, uv, duvx, duvy);
                 color = mix(sharp, calm, u.motion);
             } else {
                 float2 g = abs(fract(uv * float2(16.0, 9.0)) - 0.5);

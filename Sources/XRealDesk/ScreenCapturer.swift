@@ -235,6 +235,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             .first?[.displayTime] as? UInt64).map { Double($0) * Double(tb.numer) / Double(tb.denom) / 1e9 }
         let gap = lastArrival > 0 ? arrival - lastArrival : 0
         lastArrival = arrival
+        TypingLatency.frameArrived(arrival)
         statsLock.withLock { s in
             s.frames += 1
             if let displayTime, arrival - displayTime < 1 {

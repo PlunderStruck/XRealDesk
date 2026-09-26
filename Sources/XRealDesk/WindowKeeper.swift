@@ -7,6 +7,12 @@ import CoreGraphics
 @_silgen_name("_AXUIElementGetWindow")
 private func _AXUIElementGetWindow(_ element: AXUIElement, _ wid: UnsafeMutablePointer<CGWindowID>) -> AXError
 
+// Creates an Accessibility element from an app's remote token. The normal window list only covers
+// the current Space; full-screen windows live in Spaces of their own, and this is how window
+// managers (AltTab…) reach them.
+@_silgen_name("_AXUIElementCreateWithRemoteToken")
+private func _AXUIElementCreateWithRemoteToken(_ token: CFData) -> Unmanaged<AXUIElement>?
+
 /// Two jobs:
 ///  1. Window memory: remembers which windows live on which glasses screen (and where), and puts
 ///     them back whenever the screens return: after a restart, unplug/replug, sleep or a
@@ -27,6 +33,8 @@ final class WindowKeeper {
         /// Frame relative to its screen (0…1), so it survives resolution changes.
         var rx, ry, rw, rh: Double
         var updated: Date
+        /// In native full screen (its own Space) on that screen.
+        var fullScreen: Bool? = nil
     }
 
     private(set) var entries: [UInt32: Entry] = [:]
@@ -104,11 +112,21 @@ final class WindowKeeper {
         for w in live {
             guard let i = WindowKeeper.screenIndex(of: w.bounds, screens: screens),
                   let s = screens.first(where: { $0.index == i }) else { continue }
+            // A window whose own screen is gone for now (fewer screens) is only visiting: it keeps
+            // its home and goes back when that screen returns.
+            if let old = entries[w.id], !presentScreens.contains(old.screen) {
+                entries[w.id]?.updated = now
+                seen.insert(w.id)
+                continue
+            }
             let sb = CGDisplayBounds(s.id)
             let bundle = entries[w.id]?.bundleID ?? NSRunningApplication(processIdentifier: w.pid)?.bundleIdentifier
+            let full = abs(w.bounds.minX - sb.minX) < 1 && abs(w.bounds.minY - sb.minY) < 1
+                && abs(w.bounds.width - sb.width) < 1 && abs(w.bounds.height - sb.height) < 1
             entries[w.id] = Entry(windowID: w.id, pid: w.pid, bundleID: bundle, title: w.title, screen: i,
                                   rx: (w.bounds.minX - sb.minX) / sb.width, ry: (w.bounds.minY - sb.minY) / sb.height,
-                                  rw: w.bounds.width / sb.width, rh: w.bounds.height / sb.height, updated: Date())
+                                  rw: w.bounds.width / sb.width, rh: w.bounds.height / sb.height, updated: now,
+                                  fullScreen: full)
             seen.insert(w.id)
         }
         // Forget windows that were closed, or that you dragged off the glasses yourself: it was on
@@ -178,7 +196,7 @@ final class WindowKeeper {
                 if let win = self.axWindow(for: job.entry, live: job.current != nil, taken: taken) {
                     var id: CGWindowID = 0
                     if _AXUIElementGetWindow(win, &id) == .success { taken.insert(id) }
-                    self.move(win, to: job.target)
+                    self.move(win, to: job.target, fullScreen: job.entry.fullScreen == true)
                     moved += 1
                 } else {
                     unmatched.append(job.entry.windowID)
@@ -190,6 +208,44 @@ final class WindowKeeper {
                     self.entries[id] = nil
                 }
                 Log.info("Window memory: restored \(moved) window(s) to the glasses")
+                completion(moved)
+            }
+        }
+    }
+
+    /// Fewer screens: move the windows of the screens about to go onto the ones that stay (screen
+    /// k → k mod remaining, same place and size relative to the screen) before macOS scatters them
+    /// onto the Mac. They keep their home screen in memory and go back when it returns.
+    /// Full-screen windows can't be moved; macOS relocates their Space, and restore brings them back.
+    func evacuate(from leaving: [(index: Int, id: CGDirectDisplayID)], to staying: [(index: Int, id: CGDirectDisplayID)],
+                  completion: @escaping (Int) -> Void) {
+        guard WindowKeeper.isTrusted, !leaving.isEmpty, !staying.isEmpty else { completion(0); return }
+        let live = liveWindows(onScreenOnly: false)
+        var jobs: [(pid: pid_t, id: CGWindowID, target: CGRect)] = []
+        for w in live {
+            guard let i = WindowKeeper.screenIndex(of: w.bounds, screens: leaving),
+                  let from = leaving.first(where: { $0.index == i }) else { continue }
+            let fb = CGDisplayBounds(from.id)
+            if abs(w.bounds.width - fb.width) < 1 && abs(w.bounds.height - fb.height) < 1 && abs(w.bounds.minY - fb.minY) < 1 { continue }
+            let to = staying[i % staying.count]
+            let tb = CGDisplayBounds(to.id)
+            var r = CGRect(x: tb.minX + (w.bounds.minX - fb.minX) / fb.width * tb.width,
+                           y: tb.minY + (w.bounds.minY - fb.minY) / fb.height * tb.height,
+                           width: min(w.bounds.width / fb.width * tb.width, tb.width),
+                           height: min(w.bounds.height / fb.height * tb.height, tb.height))
+            r.origin.x = min(max(r.minX, tb.minX), tb.maxX - r.width)
+            r.origin.y = min(max(r.minY, tb.minY), tb.maxY - r.height)
+            jobs.append((w.pid, w.id, r))
+        }
+        guard !jobs.isEmpty else { completion(0); return }
+        axQueue.async { [weak self] in
+            guard let self else { return }
+            var moved = 0
+            for j in jobs {
+                if let win = self.axWindow(pid: j.pid, windowID: j.id) { self.move(win, to: j.target); moved += 1 }
+            }
+            DispatchQueue.main.async {
+                Log.info("Window memory: moved \(moved) window(s) off the screens being removed")
                 completion(moved)
             }
         }
@@ -291,10 +347,33 @@ final class WindowKeeper {
     }
 
     private func axWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? {
-        axWindows(pid: pid).first { w in
+        let match: (AXUIElement) -> Bool = { w in
             var id: CGWindowID = 0
             return _AXUIElementGetWindow(w, &id) == .success && id == windowID
         }
+        return axWindows(pid: pid).first(where: match) ?? axWindowsAllSpaces(pid: pid).first(where: match)
+    }
+
+    /// Every window of an app, including ones in other Spaces (full screen), found by walking the
+    /// app's element tokens. Slower; only used when the normal list doesn't have the window.
+    private func axWindowsAllSpaces(pid: pid_t) -> [AXUIElement] {
+        var found: [AXUIElement] = []
+        var token = Data(count: 20)
+        token.replaceSubrange(0..<4, with: withUnsafeBytes(of: pid.littleEndian) { Data($0) })
+        token.replaceSubrange(8..<12, with: withUnsafeBytes(of: UInt32(0x636f_636f).littleEndian) { Data($0) })
+        let deadline = Date().addingTimeInterval(0.2)
+        for element: UInt64 in 0..<1000 {
+            if element % 50 == 0, Date() > deadline { break }
+            token.replaceSubrange(12..<20, with: withUnsafeBytes(of: element.littleEndian) { Data($0) })
+            guard let el = _AXUIElementCreateWithRemoteToken(token as CFData)?.takeRetainedValue() else { continue }
+            AXUIElementSetMessagingTimeout(el, 0.1)
+            var role: CFTypeRef?
+            if AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role) == .success,
+               (role as? String) == kAXWindowRole as String {
+                found.append(el)
+            }
+        }
+        return found
     }
 
     /// Find the live AX window for a memory entry: same window ID if the app is still the same
@@ -335,6 +414,28 @@ final class WindowKeeper {
                 Log.info("  \(app) '\((e.title ?? "").prefix(40))' #\(e.windowID): remembered screen \(e.screen + 1), now \(now.map { "screen \($0 + 1)" } ?? (current == nil ? "not listed" : "off the glasses")), process \(alive ? "running" : "gone"), found by ID \(byID), by title \(byTitle)")
             }
         }
+    }
+
+    /// Moves a window that should end up in native full screen: leave full screen (a window can't
+    /// be moved while it has its own Space), move it onto the right screen, enter full screen there.
+    @discardableResult
+    private func move(_ win: AXUIElement, to r: CGRect, fullScreen: Bool) -> AXError {
+        let key = "AXFullScreen" as CFString
+        func isFull() -> Bool {
+            var v: CFTypeRef?
+            return AXUIElementCopyAttributeValue(win, key, &v) == .success && (v as? Bool) == true
+        }
+        if isFull() {
+            AXUIElementSetAttributeValue(win, key, kCFBooleanFalse)
+            for _ in 0..<30 where isFull() { Thread.sleep(forTimeInterval: 0.05) }
+            Thread.sleep(forTimeInterval: 0.6)   // the exit animation finishes after the flag flips
+        }
+        let result = move(win, to: r)
+        if fullScreen {
+            Thread.sleep(forTimeInterval: 0.2)
+            AXUIElementSetAttributeValue(win, key, kCFBooleanTrue)
+        }
+        return result
     }
 
     /// Returns the AXError of the final position set (for diagnostics).

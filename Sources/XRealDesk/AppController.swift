@@ -64,6 +64,10 @@ final class AppController: ObservableObject {
     /// ⌃⌥S cycles tracking for comparison: 0 new (steady + neck model), 1 steady without the neck
     /// model, 2 the previous tracking.
     private var trackingCompare = 0
+    /// Screen setup whose leaving windows were already moved onto the remaining screens.
+    private var evacuatedFor: String?
+    /// Capture size relative to the screen's pixels (`set capturescale=`, for measuring).
+    private var captureScale: CGFloat = 1
     private var sharpDownsample = true
     private var directRender = true
     private var renderer: Renderer?
@@ -134,6 +138,7 @@ final class AppController: ObservableObject {
         cursor.gazeFollowEnabled = settings.cursorFollowsGaze
         hotkeys.handler = { [weak self] in self?.handleHotkey($0) }
         if settings.hotkeysEnabled { hotkeys.register() }
+        TypingLatency.start()
         lastHotkeys = settings.hotkeysEnabled
 
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
@@ -241,6 +246,13 @@ final class AppController: ObservableObject {
             case "depth":   // side-by-side 3D: 1 = real depth, 0 = the same flat picture in both eyes (default)
                 self.stereoDepth = v == "1"
                 self.pushConfig()
+            case "capturescale":   // capture at this fraction of the screen's pixel size (0.4…1)
+                self.captureScale = CGFloat(min(max(Double(v) ?? 1, 0.4), 1))
+                for c in self.captures {
+                    if let px = VirtualDisplayManager.pixelSize(of: c.displayID) {
+                        c.matchSize(CGSize(width: (px.width * self.captureScale).rounded(), height: (px.height * self.captureScale).rounded()))
+                    }
+                }
             case "steady":  // steady tracking: 1 = on (default), 0 = the previous tracking, for comparing
                 self.hid.steadyTracking = v != "0"
                 self.hud(self.hid.steadyTracking ? "Steady tracking on" : "Steady tracking off (old)")
@@ -410,9 +422,25 @@ final class AppController: ObservableObject {
     }
 
     private func ensureVirtualDisplays() {
-        if !virtualDisplays.screens.isEmpty, virtualDisplays.signature != settings.displaySignature { rememberWindows() }
+        if !virtualDisplays.screens.isEmpty, virtualDisplays.signature != settings.displaySignature {
+            // Fewer screens: first move the windows off the screens about to go onto the ones that
+            // stay (they remember their home and return when it does), then remove the screens.
+            let keep = settings.screenCount
+            if settings.windowMemory, keep < virtualDisplays.screens.count, evacuatedFor != settings.displaySignature,
+               WindowKeeper.isTrusted {
+                rememberWindows()
+                evacuatedFor = settings.displaySignature
+                let list = virtualScreenList
+                windows.evacuate(from: list.filter { $0.index >= keep }, to: list.filter { $0.index < keep }) { [weak self] moved in
+                    self?.scheduleReconcile(after: moved > 0 ? 0.3 : 0)
+                }
+                return
+            }
+            rememberWindows()
+        }
         let result = virtualDisplays.sync(count: settings.screenCount, resolution: settings.resolution,
                                           hiDPI: settings.hiDPI, refreshRate: settings.refreshRate)
+        if result != .unchanged { evacuatedFor = nil }   // the next shrink moves windows again
         switch result {
         case .unchanged:
             return
@@ -1063,7 +1091,9 @@ final class AppController: ObservableObject {
         // Capture screens near your view at full rate, the rest at a trickle (1 s grace after leaving),
         // and always at the screen's real pixel size (checked once a second).
         for c in captures {
-            if tickCount % 60 == 30, let px = VirtualDisplayManager.pixelSize(of: c.displayID) { c.matchSize(px) }
+            if tickCount % 60 == 30, let px = VirtualDisplayManager.pixelSize(of: c.displayID) {
+                c.matchSize(CGSize(width: (px.width * captureScale).rounded(), height: (px.height * captureScale).rounded()))
+            }
             if !out.tracking || out.nearView.contains(c.index) { lastNearView[c.index] = now }
             c.setActive(now - (lastNearView[c.index] ?? now) < 1)
         }

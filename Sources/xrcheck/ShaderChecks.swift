@@ -25,6 +25,7 @@ func shaderChecks() {
     pd.colorAttachments[0].pixelFormat = .rgba32Float
     guard let pipe = try? device.makeRenderPipelineState(descriptor: pd) else { check(false, "direct pipeline builds"); return }
 
+
     let sd = MTLSamplerDescriptor(); sd.minFilter = .linear; sd.magFilter = .linear; sd.mipFilter = .linear
     sd.maxAnisotropy = 16; sd.sAddressMode = .clampToEdge; sd.tAddressMode = .clampToEdge
     let ld = MTLSamplerDescriptor(); ld.minFilter = .linear; ld.magFilter = .linear
@@ -69,7 +70,7 @@ func shaderChecks() {
 
     struct Scene { var layout: ScreenLayout; var yaw: Float = 0; var pitch: Float = 0; var eye = SIMD3<Float>(repeating: 0) }
     func render(_ scene: Scene, screens: [MTLTexture], lens: Bool = false, configure: (inout RendererShaders.DirectUniforms) -> Void = { _ in },
-                cursorOn: Int? = nil) -> [SIMD4<Float>] {
+                cursorOn: Int? = nil, pipeline: MTLRenderPipelineState? = nil) -> [SIMD4<Float>] {
         let panels = Array(scene.layout.panels.prefix(8))
         var gpuPanels = panels.map { p in
             RendererShaders.DirectPanel(arcCenter: p.arcCenter, height: p.height, width: p.size.x, panelHeight: p.size.y,
@@ -90,7 +91,7 @@ func shaderChecks() {
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = out; rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
         let cb = queue.makeCommandBuffer()!, enc = cb.makeRenderCommandEncoder(descriptor: rp)!
-        enc.setRenderPipelineState(pipe)
+        enc.setRenderPipelineState(pipeline ?? pipe)
         enc.setFragmentSamplerState(smp, index: 0); enc.setFragmentSamplerState(lin, index: 1)
         enc.setFragmentBytes(&u, length: MemoryLayout<RendererShaders.DirectUniforms>.stride, index: 0)
         enc.setFragmentBytes(&gpuPanels, length: MemoryLayout<RendererShaders.DirectPanel>.stride * gpuPanels.count, index: 1)

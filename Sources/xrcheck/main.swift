@@ -700,6 +700,7 @@ func replay(csv: String, calibrationPath: String) {
 
 let args = CommandLine.arguments
 if args.count > 1, args[1] == "sweep" { sweepStabilizer(); exit(0) }
+if args.count > 1, args[1] == "gpubench" { gpuBench(); exit(0) }
 if args.count > 3, args[1] == "accelbias" {
     for csv in args[3...] { print("\n### \((csv as NSString).lastPathComponent)"); accelBias(csv: csv, calibrationPath: args[2]) }
     exit(0)
