@@ -41,12 +41,18 @@ struct SetupAssistant: View {
         VStack(spacing: 0) {
             progress
                 .padding(.horizontal, 28).padding(.top, 22).padding(.bottom, 14)
-            HStack(spacing: 10) {
-                Image(systemName: model.step.symbol).font(.system(size: 22, weight: .medium)).foregroundStyle(.tint)
-                Text(model.step.title).font(.title2.weight(.semibold))
+            HStack(spacing: 14) {
+                HeroIcon(symbol: model.step.symbol)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Step \(model.step.rawValue + 1) of \(SetupModel.Step.allCases.count)")
+                        .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    Text(model.step.title).font(.system(size: 22, weight: .bold, design: .rounded))
+                }
                 Spacer()
             }
-            .padding(.horizontal, 28)
+            .padding(.horizontal, 24)
+            .id("title-\(model.step.rawValue)")
+            .transition(.opacity)
             Group {
                 switch model.step {
                 case .connect: ConnectStep(app: app)
@@ -57,19 +63,23 @@ struct SetupAssistant: View {
                 case .done: DoneStep(app: app, settings: settings)
                 }
             }
-            .padding(.horizontal, 28).padding(.top, 14)
+            .padding(.horizontal, 28).padding(.top, 10)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .id(model.step.rawValue)
+            .transition(.asymmetric(insertion: .opacity.combined(with: .offset(x: 24)), removal: .opacity))
             Divider()
             footer.padding(.horizontal, 20).padding(.vertical, 14)
         }
-        .frame(width: 620, height: 560)
+        .frame(width: 640, height: 600)
+        .background(Glass(material: .underWindowBackground).ignoresSafeArea())
+        .tint(Brand.accent)
     }
 
     private var progress: some View {
         HStack(spacing: 6) {
             ForEach(SetupModel.Step.allCases, id: \.rawValue) { s in
                 Capsule()
-                    .fill(s.rawValue <= model.step.rawValue ? Color.accentColor : Color.primary.opacity(0.12))
+                    .fill(s.rawValue <= model.step.rawValue ? AnyShapeStyle(Brand.gradient) : AnyShapeStyle(Color.primary.opacity(0.12)))
                     .frame(height: 4)
                     .onTapGesture { model.step = s }
                     .help(s.title)
@@ -89,11 +99,11 @@ struct SetupAssistant: View {
             if model.step == .done {
                 Button("Start using XRealDesk") { model.onFinish() }
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(PrimaryButtonStyle())
             } else {
                 Button("Continue") { move(1) }
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(PrimaryButtonStyle())
             }
         }
         .controlSize(.large)
@@ -113,7 +123,7 @@ struct SetupAssistant: View {
 
     private func move(_ delta: Int) {
         if let s = SetupModel.Step(rawValue: model.step.rawValue + delta) {
-            withAnimation(.easeInOut(duration: 0.15)) { model.step = s }
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) { model.step = s }
         }
     }
 }
@@ -188,9 +198,9 @@ struct PermissionRows: View {
                      "Screen Recording  ·  required",
                      screenDetail) {
                 if !app.permissionGranted {
-                    Button("Allow…") { app.requestScreenRecordingPermission() }.buttonStyle(.borderedProminent)
+                    Button("Allow…") { app.requestScreenRecordingPermission() }.buttonStyle(PrimaryButtonStyle(compact: true))
                 } else if app.needsRelaunchForPermission {
-                    Button("Restart now") { app.relaunch() }.buttonStyle(.borderedProminent)
+                    Button("Restart now") { app.relaunch() }.buttonStyle(PrimaryButtonStyle(compact: true))
                 }
             }
             Divider()
@@ -256,7 +266,7 @@ private struct StraightenStep: View {
                         Text("Put the glasses on and look straight ahead, then recenter.").font(.body.weight(.medium))
                         HStack {
                             Button { app.recenter() } label: { Label("Recenter", systemImage: "scope") }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(PrimaryButtonStyle(compact: true))
                             Text("Anytime: ⌃⌥R").font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -299,8 +309,8 @@ private struct StraightenStep: View {
     private func nudge(_ d: Double) { settings.rollDegrees = min(15, max(-15, settings.rollDegrees + d)) }
 
     private func stepNumber(_ n: Int) -> some View {
-        Text("\(n)").font(.callout.weight(.bold)).foregroundStyle(.white)
-            .frame(width: 24, height: 24).background(Circle().fill(Color.accentColor))
+        Text("\(n)").font(.system(.callout, design: .rounded).weight(.bold)).foregroundStyle(.white)
+            .frame(width: 24, height: 24).background(Circle().fill(Brand.gradient))
     }
 }
 

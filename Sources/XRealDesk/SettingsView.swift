@@ -29,16 +29,64 @@ struct SettingsView: View {
     var openSetup: (SetupModel.Step?) -> Void = { _ in }
 
     var body: some View {
-        TabView(selection: $nav.tab) {
-            general.tabItem { Label("General", systemImage: "gearshape") }.tag(0)
-            screens.tabItem { Label("Screens", systemImage: "rectangle.split.3x1") }.tag(1)
-            tracking.tabItem { Label("Tracking", systemImage: "move.3d") }.tag(2)
-            picture.tabItem { Label("Picture", systemImage: "sparkles.tv") }.tag(3)
-            shortcuts.tabItem { Label("Shortcuts", systemImage: "command") }.tag(4)
+        NavigationSplitView {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(SettingsView.pages, id: \.id) { page in
+                    SidebarRow(page: page, selected: nav.tab == page.id) { nav.tab = page.id }
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 10).padding(.top, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 190, max: 220)
+        } detail: {
+            Group {
+                switch nav.tab {
+                case 1: screens
+                case 2: tracking
+                case 3: picture
+                case 4: shortcuts
+                default: general
+                }
+            }
+            .navigationTitle(SettingsView.pages.first { $0.id == nav.tab }?.title ?? "General")
         }
-        .padding(.top, 8)
-        .frame(width: 580, height: 640)
+        .frame(width: 760, height: 620)
+        .tint(Brand.accent)
     }
+
+    struct Page { let id: Int; let title: String; let symbol: String; let colors: [Color] }
+
+    /// Sidebar entry drawn by hand, so the selection uses the brand color, not the system accent.
+    struct SidebarRow: View {
+        let page: Page
+        let selected: Bool
+        let action: () -> Void
+        @StateObject private var hover = HoverState()
+
+        var body: some View {
+            Button(action: action) {
+                HStack(spacing: 10) {
+                    IconBadge(symbol: page.symbol, colors: page.colors, size: 24)
+                    Text(page.title).font(.system(size: 13, weight: selected ? .semibold : .medium))
+                    Spacer()
+                }
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(selected ? AnyShapeStyle(Brand.accent.opacity(0.28)) : AnyShapeStyle(Color.primary.opacity(hover.on ? 0.06 : 0))))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hover.on = $0 }
+        }
+    }
+    static let pages: [Page] = [
+        Page(id: 0, title: "General", symbol: "gearshape.fill", colors: [Color(white: 0.62), Color(white: 0.45)]),
+        Page(id: 1, title: "Screens", symbol: "rectangle.split.3x1.fill", colors: [Brand.indigo, Brand.cyan]),
+        Page(id: 2, title: "Tracking", symbol: "move.3d", colors: [Color(red: 1, green: 0.62, blue: 0.2), Color(red: 1, green: 0.42, blue: 0.2)]),
+        Page(id: 3, title: "Picture", symbol: "sparkles", colors: [Color(red: 0.75, green: 0.4, blue: 1), Color(red: 0.55, green: 0.3, blue: 0.95)]),
+        Page(id: 4, title: "Shortcuts", symbol: "command", colors: [Color(red: 0.3, green: 0.8, blue: 0.55), Color(red: 0.15, green: 0.65, blue: 0.45)]),
+    ]
 
     // MARK: General
 

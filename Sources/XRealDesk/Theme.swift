@@ -43,6 +43,8 @@ struct ValueSlider: View {
     }
 }
 
+final class HoverState: ObservableObject { @Published var on = false }
+
 /// Selectable tile with an icon and a title (presets, modes, placements).
 struct Tile<Icon: View>: View {
     let title: String
@@ -51,12 +53,14 @@ struct Tile<Icon: View>: View {
     var height: CGFloat = 54
     let action: () -> Void
     @ViewBuilder var icon: Icon
+    @StateObject private var hover = HoverState()
 
     var body: some View {
         Button(action: action) {
             VStack(spacing: 5) {
-                icon
+                icon.foregroundStyle(selected ? AnyShapeStyle(Brand.gradient) : AnyShapeStyle(Color.primary.opacity(0.85)))
                 Text(title).font(.system(size: 11, weight: selected ? .semibold : .medium)).lineLimit(1)
+                    .minimumScaleFactor(0.8)
                 if let subtitle {
                     Text(subtitle).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
                         .multilineTextAlignment(.center)
@@ -65,12 +69,17 @@ struct Tile<Icon: View>: View {
             .frame(maxWidth: .infinity, minHeight: height)
             .padding(.vertical, 4)
             .contentShape(Rectangle())
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(selected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.05)))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(0.08), lineWidth: selected ? 1.5 : 1))
+            .background(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(selected ? Brand.accent.opacity(0.16) : Color.primary.opacity(hover.on ? 0.09 : 0.045)))
+            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(selected ? AnyShapeStyle(Brand.gradient) : AnyShapeStyle(Color.primary.opacity(hover.on ? 0.16 : 0.07)),
+                              lineWidth: selected ? 1.5 : 1))
+            .scaleEffect(hover.on && !selected ? 1.02 : 1)
+            .animation(.easeOut(duration: 0.12), value: hover.on)
+            .animation(.easeOut(duration: 0.18), value: selected)
         }
         .buttonStyle(.plain)
+        .onHover { hover.on = $0 }
     }
 }
 
@@ -188,7 +197,7 @@ struct PlacementDiagram: View {
                     RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.35))
                         .frame(width: mac.width, height: mac.height).position(macCenter)
                     ForEach(0..<glassCenters.count, id: \.self) { i in
-                        RoundedRectangle(cornerRadius: 2).fill(Color.accentColor.opacity(0.75))
+                        RoundedRectangle(cornerRadius: 2).fill(Brand.gradient)
                             .frame(width: glass.width, height: glass.height).position(glassCenters[i])
                     }
                 }

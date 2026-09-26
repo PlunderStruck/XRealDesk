@@ -101,11 +101,11 @@ struct LayoutPreset: Identifiable {
               resolution: .default, widthDegrees: 33, curve: 0.45),
         .init(id: "triple", title: "Triple", symbol: "rectangle.split.3x1", count: 3, rows: 1,
               resolution: .default, widthDegrees: 33, curve: 0.55),
-        .init(id: "ultrawide", title: "Ultrawide", symbol: "rectangle.ratio.16.to.9", count: 1, rows: 1,
+        .init(id: "ultrawide", title: "Wide", symbol: "rectangle.ratio.16.to.9", count: 1, rows: 1,
               resolution: .init(width: 3840, height: 1080), widthDegrees: 80, curve: 0.85),
         .init(id: "quad", title: "Quad", symbol: "rectangle.split.2x2", count: 4, rows: 2,
               resolution: .default, widthDegrees: 33, curve: 0.45),
-        .init(id: "command", title: "Command", symbol: "square.grid.3x2", count: 6, rows: 2,
+        .init(id: "command", title: "Six", symbol: "square.grid.3x2", count: 6, rows: 2,
               resolution: .default, widthDegrees: 33, curve: 0.7),
     ]
 }
