@@ -104,14 +104,23 @@ public struct ScreenLayout: Sendable, Equatable {
     ///   - tiltDegrees: raise (+) or lower (−) the whole layout
     public init(count: Int, rows: Int, widthDegrees: Float, aspect: Float, gapDegrees: Float,
                 curve: Float, tiltDegrees: Float = 0, distance: Float = 1.5) {
-        self.distance = distance
-        self.curve = min(max(curve, 0), 1)
-        self.tilt = SpatialMath.radians(tiltDegrees)
-        let d = distance
-        let w = 2 * d * tan(SpatialMath.radians(widthDegrees) / 2)
-        let h = w / aspect
-        let gap = d * SpatialMath.radians(gapDegrees)
-        let cells = ScreenLayout.grid(count: count, rows: rows)
+        // Anything a slider, a preset or a corrupted preference could hand us stays in a range that
+        // gives real geometry (180° screens have infinite width, aspect 0 infinite height, …).
+        func clamp(_ v: Float, _ lo: Float, _ hi: Float, _ fallback: Float) -> Float { v.isFinite ? min(max(v, lo), hi) : fallback }
+        let d = clamp(distance, 0.2, 20, 1.5)
+        self.distance = d
+        self.tilt = SpatialMath.radians(clamp(tiltDegrees, -85, 85, 0))
+        let w = 2 * d * tan(SpatialMath.radians(clamp(widthDegrees, 1, 150, 33)) / 2)
+        let h = w / clamp(aspect, 0.2, 20, 16.0 / 9)
+        let gap = d * SpatialMath.radians(clamp(gapDegrees, 0, 30, 1.5))
+        let cells = ScreenLayout.grid(count: max(count, 0), rows: max(rows, 1))
+        // A row that can't fit around you (e.g. 8 wide screens fully curved) would overlap itself
+        // behind your back: open the curve just enough that the widest row spans at most ~340°.
+        var c = clamp(curve, 0, 1, 0.6)
+        let widestRow = Float(cells.map(\.colsInRow).max() ?? 0)
+        let rowArc = widestRow * w + max(widestRow - 1, 0) * gap
+        if c > 1e-3, rowArc > 0 { c = min(c, d * 2 * .pi * 0.94 / rowArc) }
+        self.curve = c
         let rowCount = (cells.map(\.row).max() ?? 0) + 1
         for (i, cell) in cells.enumerated() {
             let colOffset = Float(cell.col) - Float(cell.colsInRow - 1) / 2   // left → right

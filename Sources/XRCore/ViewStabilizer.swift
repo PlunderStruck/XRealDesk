@@ -38,7 +38,15 @@ public struct ViewStabilizer: Sendable {
     ///   - dt: seconds since last frame
     /// - Returns: the orientation to render with.
     public mutating func update(head: simd_quatf, angularSpeed: Float, dt: Float) -> simd_quatf {
-        guard leash > 0, dt > 0, var v = view else {
+        // One bad number must never poison the view for good: ignore a non-finite head (keep the
+        // last view), treat a non-finite speed as still, and restart after a long gap.
+        let v4 = head.vector
+        guard v4.x.isFinite, v4.y.isFinite, v4.z.isFinite, v4.w.isFinite else {
+            return view ?? simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+        }
+        let angularSpeed = angularSpeed.isFinite ? angularSpeed : 0
+        if !speed.isFinite { speed = 0 }
+        guard leash > 0, dt > 0, dt < 1, var v = view else {
             view = head
             return head
         }
@@ -58,7 +66,12 @@ public struct ViewStabilizer: Sendable {
         v = simd_slerp(v, head, 1 - exp(-dt * rate))
         // Real head motion: blend to the exact head orientation (no lag while turning).
         if release > 0 { v = simd_slerp(v, head, release) }
-        view = v.normalized
-        return view!
+        v = v.normalized
+        guard v.vector.x.isFinite, v.vector.y.isFinite, v.vector.z.isFinite, v.vector.w.isFinite else {
+            view = head
+            return head
+        }
+        view = v
+        return v
     }
 }

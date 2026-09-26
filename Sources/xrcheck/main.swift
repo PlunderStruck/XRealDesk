@@ -5,6 +5,7 @@ import XRCore
 // Self-checks for XRCore. `swift run xrcheck` runs the unit checks;
 // `swift run xrcheck live [seconds]` streams real head tracking from connected glasses.
 
+setvbuf(stdout, nil, _IOLBF, 0)   // line by line: a crash must never swallow the output before it
 var failures = 0
 func check(_ cond: Bool, _ msg: String, file: StaticString = #file, line: UInt = #line) {
     if cond { print("  ok   \(msg)") } else { failures += 1; print("  FAIL \(msg)  (line \(line))") }
@@ -353,7 +354,6 @@ func unitChecks() {
         check(z > 0 && z < 1, "depth in Metal clip range")
     }
 
-    print(failures == 0 ? "\nALL CHECKS PASSED" : "\n\(failures) CHECK(S) FAILED")
 }
 
 final class MemoryBias: GlassesBiasStore, @unchecked Sendable {
@@ -598,6 +598,8 @@ if args.count > 1, args[1] == "live" {
     live(seconds: Double(args.count > 2 ? args[2] : "20") ?? 20)
 } else {
     unitChecks()
+    robustnessChecks(calibrationJSON: args.count > 1 ? FileManager.default.contents(atPath: args[1]) : nil)
+    print(failures == 0 ? "\nALL CHECKS PASSED" : "\n\(failures) CHECK(S) FAILED")
     exit(failures == 0 ? 0 : 1)
 }
 

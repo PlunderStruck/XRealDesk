@@ -72,6 +72,25 @@ public struct GlassesCalibration: Sendable {
 
     public init() {}
 
+    /// A corrupted download (flaky cable, truncated blob) must never produce a picture or tracking
+    /// that is wildly off: every value outside what real hardware can have falls back to the default.
+    mutating func sanitize() {
+        let d = GlassesCalibration()
+        func ok(_ v: Float, _ range: ClosedRange<Float>) -> Bool { v.isFinite && range.contains(v) }
+        if !(ok(resolution.x, 320...8192) && ok(resolution.y, 240...8192)) { resolution = d.resolution }
+        if !(ok(focalX, resolution.x * 0.3...resolution.x * 10) && ok(focalY, resolution.y * 0.3...resolution.y * 20)) {
+            focalX = d.focalX; focalY = d.focalY
+        }
+        if !(ok(centerX, 0...resolution.x) && ok(centerY, 0...resolution.y)) { centerX = resolution.x / 2; centerY = resolution.y / 2 }
+        let finiteVec = { (v: SIMD3<Float>) in v.x.isFinite && v.y.isFinite && v.z.isFinite }
+        if !finiteVec(gyroBias) || simd_length(gyroBias) > 0.2 { gyroBias = d.gyroBias }        // > ~11 °/s: not a bias
+        if !finiteVec(accelBias) || simd_length(accelBias) > 0.2 { accelBias = d.accelBias }     // > 0.2 g
+        let a = gyroAlignment
+        let orthonormal = [a.columns.0, a.columns.1, a.columns.2].allSatisfy { finiteVec($0) && abs(simd_length($0) - 1) < 0.05 }
+            && abs(simd_determinant(a) - 1) < 0.1
+        if !orthonormal { gyroAlignment = d.gyroAlignment }
+    }
+
     public static func headFromRaw(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(-v.x, v.z, v.y) }
     static func headFromPre(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(v.x, -v.y, -v.z) }
 
@@ -116,6 +135,7 @@ public struct GlassesCalibration: Sendable {
                 cal.resolution = SIMD2(res[0], res[1])
             }
         }
+        cal.sanitize()
         var perEyeGrids: [DistortionGrid?] = [nil, nil]
         if let dd = root["display_distortion"] as? [String: Any] {
             perEyeGrids = ["left_display", "right_display"].map { DistortionGrid.parse(dd[$0]) }
@@ -187,8 +207,9 @@ public struct DistortionGrid: Sendable {
     static func parse(_ any: Any?) -> DistortionGrid? {
         guard let d = any as? [String: Any], (d["type"] as? NSNumber)?.intValue == 1,
               let cols = (d["num_col"] as? NSNumber)?.intValue, let rows = (d["num_row"] as? NSNumber)?.intValue,
+              (2...512).contains(cols), (2...512).contains(rows),   // before multiplying: corrupt sizes can overflow
               let raw = (d["data"] as? [Any])?.compactMap({ ($0 as? NSNumber)?.floatValue }),
-              raw.count == cols * rows * 4, cols >= 2, rows >= 2 else { return nil }
+              raw.count == cols * rows * 4, raw.allSatisfy({ $0.isFinite }) else { return nil }
         var us: [Float] = [], vs: [Float] = [], xy: [SIMD2<Float>] = []
         for r in 0..<rows {
             for c in 0..<cols {

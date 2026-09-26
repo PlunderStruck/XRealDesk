@@ -97,6 +97,8 @@ public struct OrientationFilter: Sendable {
     public mutating func update(gyro rawGyro: SIMD3<Float>, accel: SIMD3<Float>, dt rawDt: Float) {
         guard rawGyro.x.isFinite, rawGyro.y.isFinite, rawGyro.z.isFinite,
               accel.x.isFinite, accel.y.isFinite, accel.z.isFinite else { return }
+        // The sensor tops out at ±2000 °/s and ±16 g: anything beyond is a corrupted packet, not motion.
+        guard simd_length(rawGyro) < 60, simd_length(accel) < 32 else { return }
         let aNorm = simd_length(accel)
 
         if !initialized {
