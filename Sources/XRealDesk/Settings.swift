@@ -108,7 +108,15 @@ struct LayoutPreset: Identifiable {
 
 /// User settings, persisted in UserDefaults. Main-thread only.
 final class Settings: ObservableObject {
-    private let d = UserDefaults.standard
+    private let d: UserDefaults
+
+    /// A stored number, or the default if it's missing, not a number (NaN/∞ from a corrupted
+    /// preferences file), or outside what the controls allow. (`min(max(nan, lo), hi)` is NaN.)
+    private static func number(_ d: UserDefaults, _ key: String, _ lo: Double, _ hi: Double) -> Double {
+        let v = d.double(forKey: key)
+        let fallback = (d.volatileDomain(forName: UserDefaults.registrationDomain)[key] as? Double) ?? lo
+        return v.isFinite ? min(max(v, lo), hi) : min(max(fallback, lo), hi)
+    }
 
     // Screens
     @Published var screenCount: Int { didSet { d.set(screenCount, forKey: "screenCount") } }
@@ -203,7 +211,8 @@ final class Settings: ObservableObject {
 
     static let maxScreens = 8
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        d = defaults
         d.register(defaults: [
             "screenCount": 3, "rows": 1, "resolution": ResolutionPreset.default.id, "hiDPI": true,
             "refreshRate": 120, "glassesIsMain": false,
@@ -225,36 +234,36 @@ final class Settings: ObservableObject {
             if let i = Int(k) { offsets[i] = CGPoint(x: v[0], y: v[1]) }
         }
         customOffsets = offsets
-        screenWidthDegrees = d.double(forKey: "screenWidthDegrees")
-        gapDegrees = d.double(forKey: "gapDegrees")
-        curve = d.double(forKey: "curve")
-        tiltDegrees = d.double(forKey: "tiltDegrees")
+        screenWidthDegrees = Self.number(d, "screenWidthDegrees", 16, 100)
+        gapDegrees = Self.number(d, "gapDegrees", 0, 10)
+        curve = Self.number(d, "curve", 0, 1)
+        tiltDegrees = Self.number(d, "tiltDegrees", -30, 30)
         trackingMode = TrackingMode(rawValue: d.string(forKey: "trackingMode") ?? "") ?? .smart
         cursorFollowsGaze = d.bool(forKey: "cursorFollowsGaze")
         keyboardFollowsGaze = d.bool(forKey: "keyboardFollowsGaze")
         windowMemory = d.bool(forKey: "windowMemory")
-        predictionMs = d.double(forKey: "predictionMs")
-        stabilityDegrees = d.double(forKey: "stabilityDegrees")
-        followLag = d.double(forKey: "followLag")
-        flickSensitivity = d.double(forKey: "flickSensitivity")
+        predictionMs = Self.number(d, "predictionMs", 0, 40)
+        stabilityDegrees = Self.number(d, "stabilityDegrees", 0, 0.4)
+        followLag = Self.number(d, "followLag", 0.05, 1.0)
+        flickSensitivity = Self.number(d, "flickSensitivity", 0, 1)
         smartFlick = d.bool(forKey: "smartFlick")
-        rollDegrees = d.double(forKey: "rollDegrees")
-        screenDistance = min(max(d.double(forKey: "screenDistance"), 0.5), 10)
-        sharpen = d.double(forKey: "sharpen")
+        rollDegrees = Self.number(d, "rollDegrees", -15, 15)
+        screenDistance = Self.number(d, "screenDistance", 0.5, 10)
+        sharpen = Self.number(d, "sharpen", 0, 1)
         subpixel = min(max(d.integer(forKey: "subpixel"), 0), 4)
-        subpixelStrength = min(max(d.double(forKey: "subpixelStrength"), 0), 1)
-        warmth = min(max(d.double(forKey: "warmth"), -1), 1)
-        focusDim = d.double(forKey: "focusDim")
-        brightness = d.double(forKey: "brightness")
+        subpixelStrength = Self.number(d, "subpixelStrength", 0, 1)
+        warmth = Self.number(d, "warmth", -1, 1)
+        focusDim = Self.number(d, "focusDim", 0, 0.8)
+        brightness = Self.number(d, "brightness", 0.2, 1)
         highlightCursorScreen = d.bool(forKey: "highlightCursorScreen")
-        cornerRadius = d.double(forKey: "cornerRadius")
-        renderScale = min(max(d.double(forKey: "renderScale"), 1), 2)
+        cornerRadius = Self.number(d, "cornerRadius", 0, 0.06)
+        renderScale = Self.number(d, "renderScale", 1, 2)
         lensCorrection = d.bool(forKey: "lensCorrection")
         autoExtendDisplay = d.bool(forKey: "autoExtendDisplay")
         hotkeysEnabled = d.bool(forKey: "hotkeysEnabled")
         showHUD = d.bool(forKey: "showHUD")
         mirrorWhenQuitting = d.bool(forKey: "mirrorWhenQuitting")
-        glassesOffMoveDelay = d.double(forKey: "glassesOffMoveDelay")
+        glassesOffMoveDelay = Self.number(d, "glassesOffMoveDelay", -1, 600)
         diagnosticLog = d.bool(forKey: "diagnosticLog")
         Log.diagnostics = d.bool(forKey: "diagnosticLog")
         showInDock = d.bool(forKey: "showInDock")
