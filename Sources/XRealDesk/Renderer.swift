@@ -99,6 +99,8 @@ final class Renderer {
     private let sampler: MTLSamplerState
     private let linearSampler: MTLSamplerState
     private var eyeTextures: [MTLTexture?] = [nil, nil]
+    /// The same eye images read without sRGB decoding, so the final shrink blends in gamma space.
+    private var eyeGammaViews: [MTLTexture?] = [nil, nil]
     private var cursorTexture: MTLTexture?
     private var mapTextures: [MTLTexture?] = [nil, nil, nil]   // average, left, right
     private var mapInfo = (w: 1, h: 1, step: Float(8))
@@ -260,18 +262,19 @@ final class Renderer {
         for (i, e) in eyes.enumerated() {
             if eyeTextures[i] == nil || eyeTextures[i]!.width != eyePx.x || eyeTextures[i]!.height != eyePx.y {
                 let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: eyePx.x, height: eyePx.y, mipmapped: false)
-                td.usage = [.renderTarget, .shaderRead]
+                td.usage = [.renderTarget, .shaderRead, .pixelFormatView]
                 td.storageMode = .private
                 eyeTextures[i] = device.makeTexture(descriptor: td)
+                eyeGammaViews[i] = eyeTextures[i]?.makeTextureView(pixelFormat: .bgra8Unorm)
             }
-            guard let eye = eyeTextures[i] else { continue }
+            guard let eye = eyeTextures[i], let eyeGamma = eyeGammaViews[i] else { continue }
             let scale = out / e.intrinsics.calibrated
             let projection = SpatialMath.projection(focal: e.intrinsics.focal * scale, center: e.intrinsics.center * scale + m,
                                                     calibrated: eyeSize, viewport: eyeSize)
             let viewProj = projection * e.view * simd_float4x4(layout.tiltRotation)
             encodePanels(cb, target: eye, viewProj: viewProj, layout: layout, panels: panels, style: style, pixelScale: ss)
             let map = mapTextures[min(max(e.map, 0), 2)] ?? mapTextures[0]
-            warps.append((eye, map, WarpUniforms(outputSize: out, toCalibrated: e.intrinsics.calibrated / out,
+            warps.append((eyeGamma, map, WarpUniforms(outputSize: out, toCalibrated: e.intrinsics.calibrated / out,
                                                  mapStep: mapInfo.step, margin: m,
                                                  mapSize: SIMD2(Float(mapInfo.w), Float(mapInfo.h)), eyeSize: eyeSize,
                                                  lensOn: (style.lensCorrection && map != nil) ? 1 : 0,
@@ -446,7 +449,7 @@ final class Renderer {
     // texels per kernel unit, ≤ 1.5, so 6x6 texels cover it). A single bilinear tap's result depends
     // on where it lands between texels, and that phase drifts as the head moves: text shimmers.
     // Clamped to the range of the texels within one kernel unit, so edges get no halos. Reads are
-    // sRGB-decoded (linear light). Fixed size and unrolled: 3x faster than a dynamic loop.
+    // gamma-encoded (see warpFragment). Fixed size and unrolled: 3x faster than a dynamic loop.
     float3 downsample(texture2d<float> eye, float2 uv, float scale) {
         float2 size = float2(eye.get_width(), eye.get_height());
         float2 p = uv * size - 0.5;
@@ -508,8 +511,11 @@ final class Renderer {
             ideal = map.sample(s, muv).xy / w.toCalibrated;
         }
         float2 uv = (ideal + w.margin) / w.eyeSize;
-        if (w.filter < 0.5) return float4(eye.sample(s, uv).rgb, 1.0);
-        return float4(downsample(eye, uv, w.kernelWidth), 1.0);
+        // `eye` is read gamma-encoded: shrinking in gamma space keeps text as heavy as it is on a
+        // real screen. In linear light, light-on-dark text came out ~5% heavier (a glow) and
+        // dark-on-light ~9% thinner (measured against the same text drawn natively at 1x).
+        float3 c = w.filter < 0.5 ? eye.sample(s, uv).rgb : downsample(eye, uv, w.kernelWidth);
+        return float4(select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045), 1.0);
     }
 
     // Strip of `segments` columns bent onto the layout cylinder.
