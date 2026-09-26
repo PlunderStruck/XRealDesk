@@ -871,6 +871,22 @@ final class Renderer {
         return float3(red, green, blue);
     }
 
+    // Contrast-adaptive sharpening (the idea behind AMD FidelityFX CAS): sharpen by how much room the
+    // neighbourhood leaves, so soft edges get crisper while already-crisp edges and flat areas are
+    // left alone: no halos, no crunch. `c` is this pixel's (subpixel-rendered) color; the four
+    // neighbours are one output pixel away. `amount` 0…1 (the Sharpen slider).
+    float3 casSharpen(texture2d<float> tex, sampler smp, float2 uv, float2 duvx, float2 duvy, float3 c, float amount) {
+        float3 n = tex.sample(smp, uv - duvy, level(0)).rgb;
+        float3 s = tex.sample(smp, uv + duvy, level(0)).rgb;
+        float3 e = tex.sample(smp, uv + duvx, level(0)).rgb;
+        float3 w = tex.sample(smp, uv - duvx, level(0)).rgb;
+        float3 mn = min(c, min(min(n, s), min(e, w)));
+        float3 mx = max(c, max(max(n, s), max(e, w)));
+        float3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, 1e-4), 0.0, 1.0));
+        float3 wgt = amp * (-1.0 / mix(8.0, 4.0, clamp(amount, 0.0, 1.0)));
+        return clamp((c + (n + s + e + w) * wgt) / (1.0 + 4.0 * wgt), 0.0, 1.0);
+    }
+
     float3 toLinear(float3 c) { return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045); }
 
     fragment float4 directFragment(WOut in [[stage_in]], constant DUniforms& u [[buffer(0)]], constant DPanel* panels [[buffer(1)]],
@@ -899,6 +915,7 @@ final class Renderer {
             float3 color;
             if (p.hasTexture > 0.5 && u.subpixel > 0.5) {
                 color = shadeSubpixel(screens[i], smp, uv, duvx, duvy, int(u.subpixel), u.subpixelStrength);
+                if (u.sharpen > 0.001) color = casSharpen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, color, u.sharpen);
             } else if (p.hasTexture > 0.5) {
                 color = shadeScreen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, u.sharpen, u.quality);
             } else {

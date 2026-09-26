@@ -270,7 +270,7 @@ struct SettingsView: View {
                         String(format: "%.0f%%", $0 * 100)
                     }
                 }
-                Text("Samples each color of every glasses pixel at its own position, like ClearType: crisper text. To compare the options, set Strength to 100% and cycle with ⌃⌥T: the wrong ones show red/blue fringes on letters.")
+                Text("Samples each color of every glasses pixel at its own position, like ClearType: crisper text. BGR at 100% suits the Air 2 Pro. To compare the options, set Strength to 100% and cycle with ⌃⌥T: the wrong ones show red/blue fringes on letters.")
                     .font(.caption).foregroundStyle(.secondary)
                 ValueSlider(symbol: "wand.and.rays", title: "Sharpen", value: $settings.sharpen, range: 0...1, step: 0.05) {
                     $0 < 0.01 ? "Off" : String(format: "%.0f%%", $0 * 100)
