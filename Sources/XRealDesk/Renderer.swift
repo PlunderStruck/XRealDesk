@@ -38,6 +38,8 @@ final class Renderer {
         /// 0 = soft (blended with neighbouring subpixels, fewer fringes) … 1 = each channel samples
         /// exactly its own subpixel (sharpest, most color at edges).
         var subpixelStrength: Float = 0.5
+        /// White-point multipliers (linear light) from the Warmth setting.
+        var white = SIMD3<Float>(1, 1, 1)
         /// Temporal dithering before the 8-bit output: no banding in dark gradients.
         var dither = true
         /// Blend from the sharpest filters to the calmest while the picture moves (no edge crawl).
@@ -419,6 +421,7 @@ final class Renderer {
         var distance: Float, cornerRadius: Float, sharpen: Float, quality: Float
         var panelCount: Float, subpixel: Float = 0, subpixelStrength: Float = 0.5, frame: Float = 0
         var motion: Float = 0, dither: Float = 1, pad3: Float = 0, pad4: Float = 0
+        var white = SIMD4<Float>(1, 1, 1, 1)
     }
 
     /// Single pass: every glasses pixel → lens map → ray → curved screen wall → one filtered sample.
@@ -460,7 +463,8 @@ final class Renderer {
                                    sharpen: style.sharpen, quality: style.supersample, panelCount: Float(slots.count),
                                    subpixel: Float(style.subpixel), subpixelStrength: style.subpixelStrength,
                                    frame: Float(frameIndex % 64), motion: style.motionAdaptive ? motion : 0,
-                                   dither: style.dither ? 1 : 0)
+                                   dither: style.dither ? 1 : 0,
+                                   white: SIMD4(style.white, 1))
             enc.setViewport(MTLViewport(originX: Double(u.originX), originY: 0, width: Double(out.x), height: Double(out.y), znear: 0, zfar: 1))
             enc.setFragmentBytes(&u, length: MemoryLayout<DirectUniforms>.stride, index: 0)
             enc.setFragmentTexture(map ?? dummyTexture, index: 0)
@@ -769,6 +773,7 @@ final class Renderer {
         float distance; float cornerRadius; float sharpen; float quality;
         float panelCount; float subpixel; float subpixelStrength; float frame;
         float motion; float dither; float pad3; float pad4;
+        float4 white;   // white-point (warmth) multipliers, linear light
     };
 
     // Eye-local output pixel → point on the layout surface: (arc length, height). false = no hit.
@@ -962,7 +967,7 @@ final class Renderer {
             float3 lin = toLinear(color) * (1.0 - p.dim);
             float ring = smoothstep(-2.5 * aa, -1.5 * aa, dist);   // ~1.5 px, on the screen with the cursor
             lin = mix(lin, float3(0.30, 0.62, 1.0), ring * p.highlight * 0.85);
-            lin *= alpha;
+            lin *= alpha * u.white.rgb;
             if (u.dither > 0.5) {
                 // Temporal dithering (interleaved gradient noise, two taps → triangular, ±1 step of
                 // the 8-bit output, new every frame): gradients stop banding; the eye averages it away.

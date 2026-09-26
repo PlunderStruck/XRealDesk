@@ -209,6 +209,7 @@ final class AppController: ObservableObject {
             case "height": if let x = Double(v) { self.settings.tiltDegrees = x }
             case "mode": if let m = TrackingMode(rawValue: v) { self.setMode(m) }
             case "lens": self.settings.lensCorrection = v == "1"
+            case "warmth": if let x = Double(v) { self.settings.warmth = min(max(x, -1), 1) }
             case "subpixelstrength": if let x = Double(v) { self.settings.subpixelStrength = min(max(x, 0), 1) }
             case "subpixel":   // experiment: 0 off, 1 RGB, 2 BGR (across), 3 RGB, 4 BGR (down)
                 self.settings.subpixel = min(max(Int(v) ?? 0, 0), 4)
@@ -1162,7 +1163,7 @@ final class AppController: ObservableObject {
         c.style = Renderer.Style(sharpen: Float(settings.sharpen), cornerRadius: Float(settings.cornerRadius),
                                  supersample: Float(settings.renderScale), lensCorrection: settings.lensCorrection,
                                  sharpDownsample: sharpDownsample, subpixel: settings.subpixel,
-                                 subpixelStrength: Float(settings.subpixelStrength), direct: directRender)
+                                 subpixelStrength: Float(settings.subpixelStrength), white: settings.whitePoint, direct: directRender)
         c.mode = settings.trackingMode
         c.predictionSeconds = settings.predictionMs / 1000
         c.stabilityRadians = SpatialMath.radians(Float(settings.stabilityDegrees))

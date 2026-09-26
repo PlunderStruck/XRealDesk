@@ -162,6 +162,16 @@ final class Settings: ObservableObject {
     /// seen through its mirror optics, chosen by eye at full strength), 3/4 the same with vertical stripes.
     @Published var subpixel: Int { didSet { d.set(subpixel, forKey: "subpixel") } }
     @Published var subpixelStrength: Double { didSet { d.set(subpixelStrength, forKey: "subpixelStrength") } }
+    /// White point: −1 cooler … 0 neutral … +1 warmer.
+    @Published var warmth: Double { didSet { d.set(warmth, forKey: "warmth") } }
+
+    /// Linear-light multipliers for `warmth`, scaled so the strongest channel stays at 1 (no clipping).
+    /// Roughly 6500 K ± 2500 K: warmer drops blue (and a little green), cooler drops red.
+    var whitePoint: SIMD3<Float> {
+        let w = Float(min(max(warmth, -1), 1))
+        let rgb = w >= 0 ? SIMD3<Float>(1, 1 - 0.10 * w, 1 - 0.38 * w) : SIMD3<Float>(1 + 0.30 * w, 1 + 0.07 * w, 1)
+        return rgb / max(rgb.x, max(rgb.y, rgb.z))
+    }
     /// How much to dim screens you're not looking at.
     @Published var focusDim: Double { didSet { d.set(focusDim, forKey: "focusDim") } }
     /// Overall image brightness. Lower = more see-through on the glasses.
@@ -200,7 +210,7 @@ final class Settings: ObservableObject {
             "screenWidthDegrees": 33.0, "gapDegrees": 1.5, "curve": 0.55, "tiltDegrees": 0.0,
             "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
             "predictionMs": 14.0, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
-            "sharpen": 0.35, "subpixel": 2, "subpixelStrength": 1.0, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
+            "sharpen": 0.35, "subpixel": 2, "subpixelStrength": 1.0, "warmth": 0.0, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
             "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "glassesOffMoveDelay": 10.0, "diagnosticLog": false, "showInDock": true,
         ])
         screenCount = min(max(d.integer(forKey: "screenCount"), 1), Settings.maxScreens)
@@ -233,6 +243,7 @@ final class Settings: ObservableObject {
         sharpen = d.double(forKey: "sharpen")
         subpixel = min(max(d.integer(forKey: "subpixel"), 0), 4)
         subpixelStrength = min(max(d.double(forKey: "subpixelStrength"), 0), 1)
+        warmth = min(max(d.double(forKey: "warmth"), -1), 1)
         focusDim = d.double(forKey: "focusDim")
         brightness = d.double(forKey: "brightness")
         highlightCursorScreen = d.bool(forKey: "highlightCursorScreen")
@@ -306,6 +317,7 @@ final class Settings: ObservableObject {
     func resetLook() {
         subpixel = 2
         subpixelStrength = 1
+        warmth = 0
         sharpen = 0.35; focusDim = 0.25; brightness = 1; highlightCursorScreen = true; cornerRadius = 0.018
     }
 }

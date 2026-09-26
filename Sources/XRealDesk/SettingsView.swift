@@ -256,6 +256,11 @@ struct SettingsView: View {
                 ValueSlider(symbol: "sun.max", title: "Brightness", value: $settings.brightness, range: 0.2...1, step: 0.05) {
                     String(format: "%.0f%%", $0 * 100)
                 }
+                ValueSlider(symbol: "thermometer.medium", title: "Warmth", value: $settings.warmth, range: -1...1, step: 0.05) {
+                    abs($0) < 0.01 ? "Neutral" : String(format: "%@%.0f%%", $0 > 0 ? "warm " : "cool ", abs($0) * 100)
+                }
+                Text("Match the glasses' white to a sheet of paper in your room. XREAL panels often look slightly blue: try a little warmer.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Picker("Quality", selection: $settings.renderScale) {
                     Text("Standard").tag(1.0); Text("High").tag(1.5); Text("Ultra").tag(2.0)
                 }
