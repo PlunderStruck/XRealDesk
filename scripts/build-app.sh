@@ -44,7 +44,7 @@ else
 fi
 
 if [ "${1:-}" = "--install" ]; then
-  pkill -x XRealDesk 2>/dev/null && sleep 1 || true
+  pkill -f 'MacOS/XRealDesk$' 2>/dev/null && sleep 1 || true   # the app only: the display host keeps the screens
   rm -rf /Applications/XRealDesk.app
   cp -R "$APP" /Applications/
   echo "Installed to /Applications/XRealDesk.app"

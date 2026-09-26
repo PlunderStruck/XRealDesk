@@ -339,6 +339,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 // Helper mode, run by the app as it quits: wait for it to exit, then set the glasses to mirror the
 // main screen for the session (their normal state when XRealDesk isn't running).
+if CommandLine.arguments.contains("--display-host") {
+    DisplayHost.run()
+}
+
 if CommandLine.arguments.contains("--mirror-glasses") {
     let quittingApp = getppid()   // the instance that's quitting (captured before it exits)
     Thread.sleep(forTimeInterval: 2.0)

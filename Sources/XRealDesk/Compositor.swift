@@ -43,6 +43,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         case trackingRestarted
         case forgetTextures(Int?)
         case snapshot(URL)
+        /// Test only: block the render thread (exercises the stall watchdog).
+        case stall(Double)
     }
 
     struct Output {
@@ -51,6 +53,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         var viewYawPitch = SIMD2<Float>(0, 0)
         var tracking = false
         var fps: Double = 0
+        /// When the render thread last ran a frame (for the stall watchdog).
+        var lastFrameAt: CFTimeInterval = 0
         /// The display link is pacing wrong; the main thread should restart it.
         var needsResync = false
         var sideBySide = false
@@ -551,6 +555,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         out.tracking = tracking
         out.sideBySide = lastStereo
         if let fps { out.fps = fps }
+        out.lastFrameAt = now
         let published = out
         outputLock.withLock { $0 = published }
     }
@@ -581,6 +586,9 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
                 if let index { renderer.forget(index: index) } else { renderer.forgetAll() }
             case .snapshot(let url):
                 pendingSnapshot = url
+            case .stall(let seconds):
+                Log.info("Test: blocking the render thread for \(seconds) s")
+                Thread.sleep(forTimeInterval: min(max(seconds, 0), 10))
             }
         }
     }

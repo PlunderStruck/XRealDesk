@@ -35,6 +35,9 @@ final class Renderer {
         var sharpDownsample = true
         /// Subpixel rendering: 0 off, 1 RGB left→right, 2 BGR, 3 RGB top→bottom, 4 BGR top→bottom.
         var subpixel = 0
+        /// 0 = soft (blended with neighbouring subpixels, fewer fringes) … 1 = each channel samples
+        /// exactly its own subpixel (sharpest, most color at edges).
+        var subpixelStrength: Float = 0.5
         /// Single-pass renderer: each glasses pixel is traced through the lens map onto the screens
         /// and filtered once (instead of drawing a 2x image and warping it).
         var direct = true
@@ -406,7 +409,7 @@ final class Renderer {
         var toCalibrated: SIMD2<Float>, mapSize: SIMD2<Float>
         var mapStep: Float, lensOn: Float, originX: Float, radius: Float
         var distance: Float, cornerRadius: Float, sharpen: Float, quality: Float
-        var panelCount: Float, subpixel: Float = 0, pad1: Float = 0, pad2: Float = 0
+        var panelCount: Float, subpixel: Float = 0, subpixelStrength: Float = 0.5, pad2: Float = 0
     }
 
     /// Single pass: every glasses pixel → lens map → ray → curved screen wall → one filtered sample.
@@ -446,7 +449,7 @@ final class Renderer {
                                    lensOn: (style.lensCorrection && map != nil) ? 1 : 0, originX: out.x * Float(i),
                                    radius: radius, distance: layout.distance, cornerRadius: style.cornerRadius,
                                    sharpen: style.sharpen, quality: style.supersample, panelCount: Float(slots.count),
-                                   subpixel: Float(style.subpixel))
+                                   subpixel: Float(style.subpixel), subpixelStrength: style.subpixelStrength)
             enc.setViewport(MTLViewport(originX: Double(u.originX), originY: 0, width: Double(out.x), height: Double(out.y), znear: 0, zfar: 1))
             enc.setFragmentBytes(&u, length: MemoryLayout<DirectUniforms>.stride, index: 0)
             enc.setFragmentTexture(map ?? dummyTexture, index: 0)
@@ -753,7 +756,7 @@ final class Renderer {
         float2 toCalibrated; float2 mapSize;
         float mapStep; float lensOn; float originX; float radius;
         float distance; float cornerRadius; float sharpen; float quality;
-        float panelCount; float subpixel; float pad1; float pad2;
+        float panelCount; float subpixel; float subpixelStrength; float pad2;
     };
 
     // Eye-local output pixel → point on the layout surface: (arc length, height). false = no hit.
@@ -849,7 +852,7 @@ final class Renderer {
     // channel is sampled at its own light's position, a third of a pixel apart. That roughly triples
     // the detail across the stripes for text edges. A 1-2-1 blend over neighbouring subpixel
     // positions keeps color fringes down. `mode`: 1 RGB / 2 BGR across, 3 RGB / 4 BGR down.
-    float3 shadeSubpixel(texture2d<float> tex, sampler smp, float2 uv, float2 duvx, float2 duvy, int mode) {
+    float3 shadeSubpixel(texture2d<float> tex, sampler smp, float2 uv, float2 duvx, float2 duvy, int mode, float strength) {
         float2 texSize = float2(tex.get_width(), tex.get_height());
         float2 step = (mode <= 2 ? duvx : duvy) / 3.0;        // one subpixel, in UV
         float order = (mode == 1 || mode == 3) ? 1.0 : -1.0;   // red on the low side for RGB
@@ -860,9 +863,11 @@ final class Renderer {
         }
         // Red sits one subpixel toward the low side (RGB) or high side (BGR), blue opposite.
         int r = order > 0 ? 1 : 3, b = order > 0 ? 3 : 1;
-        float red = 0.25 * s[r - 1].r + 0.5 * s[r].r + 0.25 * s[r + 1].r;
-        float green = 0.25 * s[1].g + 0.5 * s[2].g + 0.25 * s[3].g;
-        float blue = 0.25 * s[b - 1].b + 0.5 * s[b].b + 0.25 * s[b + 1].b;
+        // Strength 0: 1-2-1 blend with the neighbouring subpixels. 1: only the channel's own subpixel.
+        float side = 0.25 * (1.0 - clamp(strength, 0.0, 1.0)), mid = 1.0 - 2.0 * side;
+        float red = side * s[r - 1].r + mid * s[r].r + side * s[r + 1].r;
+        float green = side * s[1].g + mid * s[2].g + side * s[3].g;
+        float blue = side * s[b - 1].b + mid * s[b].b + side * s[b + 1].b;
         return float3(red, green, blue);
     }
 
@@ -893,7 +898,7 @@ final class Renderer {
             if (alpha <= 0.0) continue;
             float3 color;
             if (p.hasTexture > 0.5 && u.subpixel > 0.5) {
-                color = shadeSubpixel(screens[i], smp, uv, duvx, duvy, int(u.subpixel));
+                color = shadeSubpixel(screens[i], smp, uv, duvx, duvy, int(u.subpixel), u.subpixelStrength);
             } else if (p.hasTexture > 0.5) {
                 color = shadeScreen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, u.sharpen, u.quality);
             } else {

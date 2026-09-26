@@ -51,7 +51,10 @@ final class AppController: ObservableObject {
 
     private let biasStore = DefaultsBiasStore()
     private let hid: GlassesHIDService
-    private let virtualDisplays = VirtualDisplayManager()
+    /// The glasses screens, owned by the display host so they survive restarts (see DisplayHost).
+    private let virtualDisplays = DisplayHostClient()
+    /// Restarting (e.g. for a permission): leave the screens and their windows where they are.
+    private var keepScreensOnQuit = false
     private var captures: [DisplayCapture] = []
     private var window: GlassesWindow?
     /// Side-by-side 3D with real depth (experimental; the flat picture felt better on the Air 2 Pro).
@@ -66,6 +69,8 @@ final class AppController: ObservableObject {
     private var screenChangeObserver: NSObjectProtocol?
     private var failedRepairs = 0
     private var lastNearView: [Int: TimeInterval] = [:]
+    private var lastRestoreAt: Date?
+    private var lastStallRecovery: TimeInterval = 0
     private var lastResync: TimeInterval = 0
     private var lastWindowLook: TimeInterval = 0
     private var lastFrontPID: pid_t = 0
@@ -204,8 +209,11 @@ final class AppController: ObservableObject {
             case "height": if let x = Double(v) { self.settings.tiltDegrees = x }
             case "mode": if let m = TrackingMode(rawValue: v) { self.setMode(m) }
             case "lens": self.settings.lensCorrection = v == "1"
+            case "subpixelstrength": if let x = Double(v) { self.settings.subpixelStrength = min(max(x, 0), 1) }
             case "subpixel":   // experiment: 0 off, 1 RGB, 2 BGR (across), 3 RGB, 4 BGR (down)
                 self.settings.subpixel = min(max(Int(v) ?? 0, 0), 4)
+            case "stall":   // test: freeze the render thread for N seconds (the watchdog should recover)
+                self.compositor?.send(.stall(Double(v) ?? 3))
             case "diagnostics": self.settings.diagnosticLog = v == "1"
             case "refresh": if let x = Int(v), x == 60 || x == 120 { self.settings.refreshRate = x }
             case "direct":   // 1 = single-pass renderer (default), 0 = two-pass (supersample + warp)
@@ -265,7 +273,13 @@ final class AppController: ObservableObject {
         let glassesForMirror = glassesDisplayID
 
         rememberWindows()
+        if keepScreensOnQuit {
+            Log.info("Restarting: keeping the glasses screens for the next XRealDesk")
+            hotkeys.unregister()
+            return
+        }
         stopEverything()
+        virtualDisplays.quit()
         if settings.mirrorWhenQuitting, glassesForMirror != nil || DisplayConfigurator.findGlassesDisplay() != nil,
            let exe = Bundle.main.executablePath {
             // macOS undoes this app's "extended while running" change as the process exits, which
@@ -544,6 +558,13 @@ final class AppController: ObservableObject {
     /// exist, then pause recording until they're restored.
     private func rememberWindows() {
         guard settings.windowMemory, !virtualDisplays.screens.isEmpty else { return }
+        // Right after the screens came (back), windows are still where macOS dropped them: saving now
+        // would overwrite your layout with the shuffle. Keep the memory as it was.
+        if let r = lastRestoreAt, Date().timeIntervalSince(r) < 30 {
+            windows.save()
+            windows.suspended = true
+            return
+        }
         windows.snapshot(screens: virtualScreenList, displaysStableFor: 0)   // never forget on the way out
         windows.save()
         windows.suspended = true
@@ -554,6 +575,7 @@ final class AppController: ObservableObject {
     }
 
     private func restoreWindows() {
+        lastRestoreAt = Date()
         guard settings.windowMemory else { windows.suspended = false; return }
         Log.info("Window memory: restore requested for \(virtualScreenList.count) screen(s)")
         windows.restore(screens: virtualScreenList) { [weak self] moved in
@@ -562,6 +584,19 @@ final class AppController: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + (moved > 0 ? 1.0 : 0)) { self.windows.suspended = false }
             if moved > 0 { self.hud("Put back \(moved) window\(moved == 1 ? "" : "s")") }
         }
+    }
+
+    /// A fresh output window and compositor (its own frame lock and display link), keeping the
+    /// virtual screens and captures. Used when the renderer stalls.
+    private func recreateRenderer() {
+        compositor?.stop()
+        compositor = nil
+        if let o = screenChangeObserver { NotificationCenter.default.removeObserver(o); screenChangeObserver = nil }
+        uiTimer?.invalidate()
+        uiTimer = nil
+        window?.orderOut(nil)
+        window = nil
+        scheduleReconcile()
     }
 
     private func stopEverything() {
@@ -715,6 +750,7 @@ final class AppController: ObservableObject {
 
     func relaunch() {
         onBeforeRelaunch?()
+        keepScreensOnQuit = true
         let path = Bundle.main.bundlePath
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -1030,6 +1066,23 @@ final class AppController: ObservableObject {
         let visible = sinceMove < sinceKey
         if visible != cursorVisible { cursorVisible = visible; compositor.setCursorVisible(visible) }
 
+        // Watchdog: the picture in the glasses stopped updating. Record where every thread is (so the
+        // cause can be found) and start a fresh renderer instead of leaving the glasses frozen.
+        if !glassesOff, let w = window, w.isVisible, compositor.isRunning, out.lastFrameAt > 0,
+           let gid = glassesDisplayID, CGDisplayIsAsleep(gid) == 0,
+           now - out.lastFrameAt > 1.5, now - lastStallRecovery > 10 {
+            lastStallRecovery = now
+            Log.error(String(format: "Renderer stalled (no frame for %.1f s): sampling threads, then restarting it", now - out.lastFrameAt))
+            let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/XRealDesk")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"
+            let sample = Process()
+            sample.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
+            sample.arguments = ["\(getpid())", "1", "-mayDie", "-file", dir.appendingPathComponent("stall-\(f.string(from: Date())).txt").path]
+            try? sample.run()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.recreateRenderer() }
+            return
+        }
         if out.needsResync, !glassesOff, let w = window, w.isVisible, now - lastResync > 3 {
             lastResync = now
             compositor.clearResyncRequest()
@@ -1075,7 +1128,9 @@ final class AppController: ObservableObject {
                 lastWindowLook = now
                 lastFrontPID = front
                 windows.noteFocus(screens: screens)
-                if settings.windowMemory { windows.snapshot(screens: screens, displaysStableFor: displaysStableFor) }
+                if settings.windowMemory, lastRestoreAt.map({ Date().timeIntervalSince($0) > 30 }) ?? true {
+                    windows.snapshot(screens: screens, displaysStableFor: displaysStableFor)
+                }
             }
         }
         if screensUp, settings.windowMemory, tickCount % 1800 == 0 { windows.save() }             // every 30 s
@@ -1106,7 +1161,8 @@ final class AppController: ObservableObject {
         c.layout = layout
         c.style = Renderer.Style(sharpen: Float(settings.sharpen), cornerRadius: Float(settings.cornerRadius),
                                  supersample: Float(settings.renderScale), lensCorrection: settings.lensCorrection,
-                                 sharpDownsample: sharpDownsample, subpixel: settings.subpixel, direct: directRender)
+                                 sharpDownsample: sharpDownsample, subpixel: settings.subpixel,
+                                 subpixelStrength: Float(settings.subpixelStrength), direct: directRender)
         c.mode = settings.trackingMode
         c.predictionSeconds = settings.predictionMs / 1000
         c.stabilityRadians = SpatialMath.radians(Float(settings.stabilityDegrees))

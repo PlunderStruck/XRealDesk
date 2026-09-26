@@ -55,17 +55,17 @@ enum Log {
     private static func write(_ message: String) {
         let now = Date()
         queue.async {
-            // The same line again within a minute (a device rescanning every few seconds…) is counted,
-            // not written; the count shows up with the next one that is written.
+            // A line repeating more than 3 times a minute (a device rescanning every few seconds…) is
+            // counted, not written; the count shows up with the next one that is written.
             var suffix = ""
             if let r = repeats[message], now.timeIntervalSince(r.since) < 60 {
                 repeats[message] = (r.count + 1, r.since)
-                return
-            } else if let r = repeats[message], r.count > 0 {
-                suffix = " (repeated \(r.count)× in the last minute)"
+                if r.count + 1 > 3 { return }
+            } else {
+                if let r = repeats[message], r.count > 3 { suffix = " (repeated \(r.count - 3) more times in the last minute)" }
+                if repeats.count > 500 { repeats.removeAll() }
+                repeats[message] = (1, now)
             }
-            if repeats.count > 500 { repeats.removeAll() }
-            repeats[message] = (0, now)
             let line = "\(formatter.string(from: now)) \(message)\(suffix)\n"
             if ProcessInfo.processInfo.environment["XRD_STDOUT"] != nil { print(line, terminator: "") }
             written += line.utf8.count
