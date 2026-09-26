@@ -158,7 +158,8 @@ final class VirtualDisplayManager {
                 if r != .success { allGood = false }
             } else {
                 let list = modes.map { "\($0.width)x\($0.height)/\($0.pixelWidth)" }.joined(separator: ", ")
-                Log.info("No exact mode for display \(s.index + 1); available: \(list)")
+                Log.info("No exact mode for display \(s.index + 1) yet; available: \(list)")
+                allGood = false   // right after a mode change the list can lag: try again
             }
         }
         return allGood

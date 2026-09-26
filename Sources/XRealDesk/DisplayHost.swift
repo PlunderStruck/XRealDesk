@@ -53,6 +53,7 @@ enum DisplayHost {
             Log.error("Display host: can't listen on \(path)")
             exit(1)
         }
+        Log.diagnostics = UserDefaults.standard.bool(forKey: "diagnosticLog")
         Log.info("Display host started (pid \(getpid()))")
         scheduleExit(after: 20)   // nobody connects: go away
         Thread.detachNewThread {
@@ -104,6 +105,7 @@ enum DisplayHost {
     }
 
     private static func handle(_ req: DisplayHostProtocol.Request) -> DisplayHostProtocol.Reply {
+        Log.diagnostics = UserDefaults.standard.bool(forKey: "diagnosticLog")   // follow the app's setting
         var reply = DisplayHostProtocol.Reply()
         switch req.cmd {
         case "sync":
@@ -174,8 +176,29 @@ final class DisplayHostClient {
         }
     }
 
+    /// Sets each screen to its intended mode (HiDPI "looks like" size with 2x pixels). Done here in
+    /// the app, not in the host: switching modes needs a window-server session, and from the
+    /// background host it silently failed (the screens stayed at 1x after HiDPI was switched back on).
     @discardableResult
-    func enforceModes() -> Bool { send(.init(cmd: "enforce"))?.ok ?? false }
+    func enforceModes() -> Bool {
+        var allGood = true
+        for s in screens {
+            guard CGDisplayIsOnline(s.id) != 0 else { allGood = false; continue }
+            if let cur = CGDisplayCopyDisplayMode(s.id), cur.width == Int(s.pointSize.width), cur.pixelWidth == Int(s.pixelSize.width) {
+                continue
+            }
+            let opts = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+            let modes = (CGDisplayCopyAllDisplayModes(s.id, opts) as? [CGDisplayMode]) ?? []
+            if let m = modes.first(where: { $0.width == Int(s.pointSize.width) && $0.pixelWidth == Int(s.pixelSize.width) }) {
+                let r = CGDisplaySetDisplayMode(s.id, m, nil)
+                Log.info("Set mode on glasses screen \(s.index + 1): \(m.width)x\(m.height) (\(m.pixelWidth)px) -> \(r.rawValue)")
+                if r != .success { allGood = false }
+            } else {
+                allGood = false   // the list can lag right after a mode change: try again
+            }
+        }
+        return allGood
+    }
 
     func destroyAll() { _ = send(.init(cmd: "destroy")) }
 

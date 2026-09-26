@@ -1033,6 +1033,15 @@ final class AppController: ObservableObject {
         if simd_length(out.viewYawPitch - live.viewYawPitch) > SpatialMath.radians(0.3) { live.viewYawPitch = out.viewYawPitch }
         if abs(out.fps - live.renderFPS) > 0.5 { live.renderFPS = out.fps }
         if live.sideBySide != out.sideBySide { live.sideBySide = out.sideBySide }
+        // Every couple of seconds: does each screen really run the mode the settings ask for (e.g. HiDPI
+        // after switching it back on)? If not, set it again.
+        if tickCount % 120 == 60, displaysStableFor > 2, !virtualDisplays.screens.isEmpty,
+           virtualDisplays.screens.contains(where: { s in
+               VirtualDisplayManager.pixelSize(of: s.id).map { Int($0.width) != Int(s.pixelSize.width) } ?? false
+           }) {
+            Log.info("A glasses screen isn't in its intended mode; setting it again")
+            virtualDisplays.enforceModes()
+        }
         // Capture screens near your view at full rate, the rest at a trickle (1 s grace after leaving),
         // and always at the screen's real pixel size (checked once a second).
         for c in captures {
