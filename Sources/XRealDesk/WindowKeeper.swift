@@ -69,6 +69,8 @@ final class WindowKeeper {
                   let b = w[kCGWindowBounds as String] as? [String: CGFloat],
                   let x = b["X"], let y = b["Y"], let wd = b["Width"], let ht = b["Height"],
                   wd >= 80, ht >= 60,
+                  // Untitled strips (browser popups, toolbars, infobars) aren't real windows to remember.
+                  !(((w[kCGWindowName as String] as? String) ?? "").isEmpty && ht < 200),
                   (w[kCGWindowAlpha as String] as? Double ?? 1) > 0.01 else { return nil }
             return LiveWindow(id: id, pid: pid, bounds: CGRect(x: x, y: y, width: wd, height: ht),
                               title: w[kCGWindowName as String] as? String,
@@ -160,7 +162,9 @@ final class WindowKeeper {
             target.origin.x = min(max(target.minX, sb.minX), sb.maxX - target.width)
             target.origin.y = min(max(target.minY, sb.minY), sb.maxY - target.height)
             let current = live.first { $0.id == e.windowID }
-            if let current, WindowKeeper.screenIndex(of: current.bounds, screens: screens) != nil { skippedAlreadyThere += 1; continue }
+            // Only skip a window that's on its own screen: after the screens are recreated, macOS
+            // often drops windows back onto glasses screens, just not the right ones.
+            if let current, WindowKeeper.screenIndex(of: current.bounds, screens: screens) == e.screen { skippedAlreadyThere += 1; continue }
             jobs.append((e, target, current))
         }
         Log.info("Window memory: \(entries.count) remembered, \(jobs.count) to put back (\(skippedAlreadyThere) already on the glasses, \(skippedNoScreen) for screens that don't exist now)")
@@ -311,6 +315,26 @@ final class WindowKeeper {
             }
         }
         return nil
+    }
+
+    /// Diagnostics, moves nothing: for every remembered window, where it is now and whether it can
+    /// be found again (by window ID, or by app + title).
+    func report(screens: [(index: Int, id: CGDirectDisplayID)]) {
+        let live = liveWindows(onScreenOnly: false)
+        let trusted = WindowKeeper.isTrusted
+        Log.info("Window memory report: \(entries.count) remembered, \(live.count) live windows, Accessibility \(trusted)")
+        for e in entries.values.sorted(by: { $0.screen < $1.screen }) {
+            let current = live.first { $0.id == e.windowID }
+            let now = current.flatMap { WindowKeeper.screenIndex(of: $0.bounds, screens: screens) }
+            let app = e.bundleID ?? "pid \(e.pid)"
+            let alive = NSRunningApplication(processIdentifier: e.pid) != nil
+            axQueue.async { [weak self] in
+                guard let self else { return }
+                let byID = trusted && self.axWindow(pid: e.pid, windowID: e.windowID) != nil
+                let byTitle = trusted && self.axWindow(for: e, live: false) != nil
+                Log.info("  \(app) '\((e.title ?? "").prefix(40))' #\(e.windowID): remembered screen \(e.screen + 1), now \(now.map { "screen \($0 + 1)" } ?? (current == nil ? "not listed" : "off the glasses")), process \(alive ? "running" : "gone"), found by ID \(byID), by title \(byTitle)")
+            }
+        }
     }
 
     /// Returns the AXError of the final position set (for diagnostics).

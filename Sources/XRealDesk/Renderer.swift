@@ -33,6 +33,8 @@ final class Renderer {
         var lensCorrection = true
         /// Shrink the supersampled image with a Catmull-Rom filter instead of one bilinear tap.
         var sharpDownsample = true
+        /// Subpixel rendering: 0 off, 1 RGB left→right, 2 BGR, 3 RGB top→bottom, 4 BGR top→bottom.
+        var subpixel = 0
         /// Single-pass renderer: each glasses pixel is traced through the lens map onto the screens
         /// and filtered once (instead of drawing a 2x image and warping it).
         var direct = true
@@ -404,7 +406,7 @@ final class Renderer {
         var toCalibrated: SIMD2<Float>, mapSize: SIMD2<Float>
         var mapStep: Float, lensOn: Float, originX: Float, radius: Float
         var distance: Float, cornerRadius: Float, sharpen: Float, quality: Float
-        var panelCount: Float, pad0: Float = 0, pad1: Float = 0, pad2: Float = 0
+        var panelCount: Float, subpixel: Float = 0, pad1: Float = 0, pad2: Float = 0
     }
 
     /// Single pass: every glasses pixel → lens map → ray → curved screen wall → one filtered sample.
@@ -443,7 +445,8 @@ final class Renderer {
                                    mapSize: SIMD2(Float(mapInfo.w), Float(mapInfo.h)), mapStep: mapInfo.step,
                                    lensOn: (style.lensCorrection && map != nil) ? 1 : 0, originX: out.x * Float(i),
                                    radius: radius, distance: layout.distance, cornerRadius: style.cornerRadius,
-                                   sharpen: style.sharpen, quality: style.supersample, panelCount: Float(slots.count))
+                                   sharpen: style.sharpen, quality: style.supersample, panelCount: Float(slots.count),
+                                   subpixel: Float(style.subpixel))
             enc.setViewport(MTLViewport(originX: Double(u.originX), originY: 0, width: Double(out.x), height: Double(out.y), znear: 0, zfar: 1))
             enc.setFragmentBytes(&u, length: MemoryLayout<DirectUniforms>.stride, index: 0)
             enc.setFragmentTexture(map ?? dummyTexture, index: 0)
@@ -750,7 +753,7 @@ final class Renderer {
         float2 toCalibrated; float2 mapSize;
         float mapStep; float lensOn; float originX; float radius;
         float distance; float cornerRadius; float sharpen; float quality;
-        float panelCount; float pad0; float pad1; float pad2;
+        float panelCount; float subpixel; float pad1; float pad2;
     };
 
     // Eye-local output pixel → point on the layout surface: (arc length, height). false = no hit.
@@ -842,6 +845,27 @@ final class Renderer {
         return c;
     }
 
+    // Subpixel rendering (as ClearType does): each pixel is three colored lights side by side, so each
+    // channel is sampled at its own light's position, a third of a pixel apart. That roughly triples
+    // the detail across the stripes for text edges. A 1-2-1 blend over neighbouring subpixel
+    // positions keeps color fringes down. `mode`: 1 RGB / 2 BGR across, 3 RGB / 4 BGR down.
+    float3 shadeSubpixel(texture2d<float> tex, sampler smp, float2 uv, float2 duvx, float2 duvy, int mode) {
+        float2 texSize = float2(tex.get_width(), tex.get_height());
+        float2 step = (mode <= 2 ? duvx : duvy) / 3.0;        // one subpixel, in UV
+        float order = (mode == 1 || mode == 3) ? 1.0 : -1.0;   // red on the low side for RGB
+        float3 s[5];
+        for (int k = 0; k < 5; k++) {
+            float2 q = clamp(uv + step * float(k - 2), 0.0, 1.0);
+            s[k] = catmullRom(tex, smp, q, texSize);
+        }
+        // Red sits one subpixel toward the low side (RGB) or high side (BGR), blue opposite.
+        int r = order > 0 ? 1 : 3, b = order > 0 ? 3 : 1;
+        float red = 0.25 * s[r - 1].r + 0.5 * s[r].r + 0.25 * s[r + 1].r;
+        float green = 0.25 * s[1].g + 0.5 * s[2].g + 0.25 * s[3].g;
+        float blue = 0.25 * s[b - 1].b + 0.5 * s[b].b + 0.25 * s[b + 1].b;
+        return float3(red, green, blue);
+    }
+
     float3 toLinear(float3 c) { return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045); }
 
     fragment float4 directFragment(WOut in [[stage_in]], constant DUniforms& u [[buffer(0)]], constant DPanel* panels [[buffer(1)]],
@@ -868,7 +892,9 @@ final class Renderer {
             float alpha = 1.0 - smoothstep(-0.5 * aa, 0.5 * aa, dist);
             if (alpha <= 0.0) continue;
             float3 color;
-            if (p.hasTexture > 0.5) {
+            if (p.hasTexture > 0.5 && u.subpixel > 0.5) {
+                color = shadeSubpixel(screens[i], smp, uv, duvx, duvy, int(u.subpixel));
+            } else if (p.hasTexture > 0.5) {
                 color = shadeScreen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, u.sharpen, u.quality);
             } else {
                 float2 g = abs(fract(uv * float2(16.0, 9.0)) - 0.5);

@@ -146,6 +146,10 @@ final class AppController: ObservableObject {
         }
 
         // Test hook: end-to-end window memory check with one app's front window (object = bundle id).
+        dnc.addObserver(forName: Notification.Name("com.xrealdesk.windowReport"), object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.windows.report(screens: self.virtualScreenList)
+        }
         dnc.addObserver(forName: Notification.Name("com.xrealdesk.testWindowMemory"), object: nil, queue: .main) { [weak self] note in
             guard let self, let bundle = note.object as? String,
                   let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first,
@@ -200,6 +204,8 @@ final class AppController: ObservableObject {
             case "height": if let x = Double(v) { self.settings.tiltDegrees = x }
             case "mode": if let m = TrackingMode(rawValue: v) { self.setMode(m) }
             case "lens": self.settings.lensCorrection = v == "1"
+            case "subpixel":   // experiment: 0 off, 1 RGB, 2 BGR (across), 3 RGB, 4 BGR (down)
+                self.settings.subpixel = min(max(Int(v) ?? 0, 0), 4)
             case "diagnostics": self.settings.diagnosticLog = v == "1"
             case "refresh": if let x = Int(v), x == 60 || x == 120 { self.settings.refreshRate = x }
             case "direct":   // 1 = single-pass renderer (default), 0 = two-pass (supersample + warp)
@@ -843,6 +849,10 @@ final class AppController: ObservableObject {
         case .rollCounterClockwise: settings.rollDegrees = max(settings.rollDegrees - 0.5, -15)
         case .morePrediction: settings.predictionMs = min(settings.predictionMs + 2, 40)
         case .lessPrediction: settings.predictionMs = max(settings.predictionMs - 2, 0)
+        case .cycleSubpixel:
+            settings.subpixel = (settings.subpixel + 1) % 5
+            let names = ["Off", "RGB  (1)", "BGR  (2)", "RGB, vertical  (3)", "BGR, vertical  (4)"]
+            hud("Subpixel text: \(names[settings.subpixel])")
         case .toggleGazeCursor:
             settings.cursorFollowsGaze.toggle()
             hud(settings.cursorFollowsGaze ? "Cursor follows gaze: on" : "Cursor follows gaze: off")
@@ -1096,7 +1106,7 @@ final class AppController: ObservableObject {
         c.layout = layout
         c.style = Renderer.Style(sharpen: Float(settings.sharpen), cornerRadius: Float(settings.cornerRadius),
                                  supersample: Float(settings.renderScale), lensCorrection: settings.lensCorrection,
-                                 sharpDownsample: sharpDownsample, direct: directRender)
+                                 sharpDownsample: sharpDownsample, subpixel: settings.subpixel, direct: directRender)
         c.mode = settings.trackingMode
         c.predictionSeconds = settings.predictionMs / 1000
         c.stabilityRadians = SpatialMath.radians(Float(settings.stabilityDegrees))

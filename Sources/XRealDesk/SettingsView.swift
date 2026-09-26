@@ -261,6 +261,12 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 Toggle("Lens correction (your glasses' factory calibration)", isOn: $settings.lensCorrection)
+                Picker("Subpixel text", selection: $settings.subpixel) {
+                    Text("Off").tag(0); Text("RGB").tag(1); Text("BGR").tag(2); Text("RGB ↓").tag(3); Text("BGR ↓").tag(4)
+                }
+                .pickerStyle(.segmented)
+                Text("Samples each color of every glasses pixel at its own position, like ClearType: crisper text. RGB suits the Air 2 Pro; if letters show color fringes, try another.")
+                    .font(.caption).foregroundStyle(.secondary)
                 ValueSlider(symbol: "wand.and.rays", title: "Sharpen", value: $settings.sharpen, range: 0...1, step: 0.05) {
                     $0 < 0.01 ? "Off" : String(format: "%.0f%%", $0 * 100)
                 }

@@ -158,6 +158,9 @@ final class Settings: ObservableObject {
 
     // Look
     @Published var sharpen: Double { didSet { d.set(sharpen, forKey: "sharpen") } }
+    /// Subpixel text rendering for the glasses' RGB stripes: 0 off, 1 RGB (Air 2 Pro, chosen by eye),
+    /// 2 BGR, 3/4 the same with vertical stripes.
+    @Published var subpixel: Int { didSet { d.set(subpixel, forKey: "subpixel") } }
     /// How much to dim screens you're not looking at.
     @Published var focusDim: Double { didSet { d.set(focusDim, forKey: "focusDim") } }
     /// Overall image brightness. Lower = more see-through on the glasses.
@@ -196,7 +199,7 @@ final class Settings: ObservableObject {
             "screenWidthDegrees": 33.0, "gapDegrees": 1.5, "curve": 0.55, "tiltDegrees": 0.0,
             "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
             "predictionMs": 14.0, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
-            "sharpen": 0.35, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
+            "sharpen": 0.35, "subpixel": 1, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
             "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "glassesOffMoveDelay": 10.0, "diagnosticLog": false, "showInDock": true,
         ])
         screenCount = min(max(d.integer(forKey: "screenCount"), 1), Settings.maxScreens)
@@ -227,6 +230,7 @@ final class Settings: ObservableObject {
         rollDegrees = d.double(forKey: "rollDegrees")
         screenDistance = min(max(d.double(forKey: "screenDistance"), 0.5), 10)
         sharpen = d.double(forKey: "sharpen")
+        subpixel = min(max(d.integer(forKey: "subpixel"), 0), 4)
         focusDim = d.double(forKey: "focusDim")
         brightness = d.double(forKey: "brightness")
         highlightCursorScreen = d.bool(forKey: "highlightCursorScreen")
@@ -298,6 +302,7 @@ final class Settings: ObservableObject {
     }
 
     func resetLook() {
+        subpixel = 1
         sharpen = 0.35; focusDim = 0.25; brightness = 1; highlightCursorScreen = true; cornerRadius = 0.018
     }
 }

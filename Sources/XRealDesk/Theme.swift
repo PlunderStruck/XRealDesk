@@ -253,6 +253,7 @@ enum Shortcuts {
         ("⌃⌥[ / ]", "Less / more curve"),
         ("⌃⌥, / .", "Straighten: rotate the picture"),
         ("⌃⌥G", "Cursor follows your gaze on / off"),
+        ("⌃⌥T", "Subpixel text: off, RGB, BGR, vertical RGB, vertical BGR"),
     ]
 }
 
