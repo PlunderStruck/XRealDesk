@@ -104,7 +104,11 @@ final class Renderer {
     private var cursorTexture: MTLTexture?
     private var mapTextures: [MTLTexture?] = [nil, nil, nil]   // average, left, right
     private var mapInfo = (w: 1, h: 1, step: Float(8))
-    private let gpuLock = OSAllocatedUnfairLock(initialState: (sum: 0.0, max: 0.0, n: 0))
+    private let gpuLock = OSAllocatedUnfairLock(initialState: (sum: 0.0, max: 0.0, n: 0, last: 0.0))
+    /// Diagnostics (render thread): how long the last frame waited for a free GPU slot (ms).
+    private(set) var lastWaitMs = 0.0
+    /// GPU time of the most recently completed frame (ms).
+    var lastGPUMs: Double { gpuLock.withLock { $0.last } }
     private var mipTextures: [Int: (texture: MTLTexture, seq: UInt64)] = [:]
     private let inFlight = DispatchSemaphore(value: 3)
 
@@ -193,7 +197,7 @@ final class Renderer {
     /// Average / worst GPU time per frame since the last call (ms).
     func takeGPUTimes() -> (avg: Double, max: Double) {
         gpuLock.withLock { g in
-            defer { g = (0, 0, 0) }
+            defer { g = (0, 0, 0, g.last) }
             return (g.n > 0 ? g.sum / Double(g.n) : 0, g.max)
         }
     }
@@ -212,7 +216,10 @@ final class Renderer {
     func render(drawable: CAMetalDrawable, eyes: [EyeView], layout: ScreenLayout,
                 panels: [PanelDraw], style: Style, snapshotTo snapshotURL: URL? = nil) -> Bool {
         // If the GPU falls behind, skip the frame rather than queueing latency.
-        guard !eyes.isEmpty, eyes.count <= 2, inFlight.wait(timeout: .now() + .milliseconds(8)) == .success else {
+        let waitStart = CACurrentMediaTime()
+        let got = !eyes.isEmpty && eyes.count <= 2 && inFlight.wait(timeout: .now() + .milliseconds(8)) == .success
+        lastWaitMs = (CACurrentMediaTime() - waitStart) * 1000
+        guard got else {
             stats.skippedBusy += 1
             return false
         }
@@ -223,11 +230,35 @@ final class Renderer {
         stats.rendered += 1
         cb.label = "XRealDesk frame"
 
-        // 1. Refresh mip chains for screens that produced new frames.
+        let full = SIMD2<Float>(Float(drawable.texture.width), Float(drawable.texture.height))
+        let out = SIMD2<Float>(full.x / Float(eyes.count), full.y)   // each eye's share of the output
+        let ss = min(max(style.supersample, 1), 2)
+        let m = Renderer.margin
+        let eyeSize = out + 2 * m
+        let eyePx = SIMD2<Int>(Int((eyeSize.x * ss).rounded()), Int((eyeSize.y * ss).rounded()))
+
+        // 1. Screen textures. A screen drawn at about its own resolution (the usual case) is sampled
+        //    straight from the captured frame. Only screens drawn clearly smaller (or at a steep
+        //    angle on a flat layout) get a mipmapped copy: copying and mipmapping every new
+        //    3200x1800 frame of every screen was the biggest GPU cost while content changed.
         var retained: [DisplayCapture.Frame] = []
-        let fresh = panels.compactMap { p -> (Int, DisplayCapture.Frame)? in
-            guard let f = p.frame, mipTextures[p.index]?.seq != f.seq else { return nil }
-            return (p.index, f)
+        var textures: [Int: MTLTexture] = [:]
+        let pxPerRadian = eyes[0].intrinsics.focal.x * out.x / eyes[0].intrinsics.calibrated.x * ss
+        var fresh: [(Int, DisplayCapture.Frame)] = []
+        for p in panels {
+            guard let f = p.frame else {
+                if let t = mipTextures[p.index]?.texture { textures[p.index] = t }
+                continue
+            }
+            let drawnWidth = 2 * atan(p.panel.size.x / 2 / layout.distance) * pxPerRadian   // eye pixels
+            if layout.curve >= 0.5, Float(f.texture.width) < drawnWidth * 1.15 {
+                textures[p.index] = f.texture
+                retained.append(f)
+            } else if mipTextures[p.index]?.seq != f.seq {
+                fresh.append((p.index, f))
+            } else if let t = mipTextures[p.index]?.texture {
+                textures[p.index] = t
+            }
         }
         if !fresh.isEmpty, let blit = cb.makeBlitCommandEncoder() {
             for (index, frame) in fresh {
@@ -246,18 +277,13 @@ final class Renderer {
                           to: dst, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin())
                 blit.generateMipmaps(for: dst)
                 mipTextures[index] = (dst, frame.seq)
+                textures[index] = dst
                 retained.append(frame)
             }
             blit.endEncoding()
         }
 
         // 2. Per eye: panels → supersampled ideal image (with margin), over black (transparent on the optics).
-        let full = SIMD2<Float>(Float(drawable.texture.width), Float(drawable.texture.height))
-        let out = SIMD2<Float>(full.x / Float(eyes.count), full.y)   // each eye's share of the output
-        let ss = min(max(style.supersample, 1), 2)
-        let m = Renderer.margin
-        let eyeSize = out + 2 * m
-        let eyePx = SIMD2<Int>(Int((eyeSize.x * ss).rounded()), Int((eyeSize.y * ss).rounded()))
         var warps: [(eye: MTLTexture, map: MTLTexture?, uniforms: WarpUniforms)] = []
         for (i, e) in eyes.enumerated() {
             if eyeTextures[i] == nil || eyeTextures[i]!.width != eyePx.x || eyeTextures[i]!.height != eyePx.y {
@@ -272,7 +298,8 @@ final class Renderer {
             let projection = SpatialMath.projection(focal: e.intrinsics.focal * scale, center: e.intrinsics.center * scale + m,
                                                     calibrated: eyeSize, viewport: eyeSize)
             let viewProj = projection * e.view * simd_float4x4(layout.tiltRotation)
-            encodePanels(cb, target: eye, viewProj: viewProj, layout: layout, panels: panels, style: style, pixelScale: ss)
+            encodePanels(cb, target: eye, viewProj: viewProj, layout: layout, panels: panels, textures: textures,
+                         style: style, pixelScale: ss)
             let map = mapTextures[min(max(e.map, 0), 2)] ?? mapTextures[0]
             warps.append((eyeGamma, map, WarpUniforms(outputSize: out, toCalibrated: e.intrinsics.calibrated / out,
                                                  mapStep: mapInfo.step, margin: m,
@@ -302,7 +329,7 @@ final class Renderer {
         cb.addCompletedHandler { cb in
             _ = retained   // keep captured IOSurfaces alive until the GPU copy finished
             let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000
-            if ms > 0 && ms < 1000 { gpu.withLock { $0.sum += ms; $0.max = max($0.max, ms); $0.n += 1 } }
+            if ms > 0 && ms < 1000 { gpu.withLock { $0.sum += ms; $0.max = max($0.max, ms); $0.n += 1; $0.last = ms } }
             sem.signal()
         }
         cb.commit()
@@ -331,8 +358,8 @@ final class Renderer {
         enc.endEncoding()
     }
 
-    private func encodePanels(_ cb: MTLCommandBuffer, target: MTLTexture, viewProj: simd_float4x4,
-                              layout: ScreenLayout, panels: [PanelDraw], style: Style, pixelScale: Float) {
+    private func encodePanels(_ cb: MTLCommandBuffer, target: MTLTexture, viewProj: simd_float4x4, layout: ScreenLayout,
+                              panels: [PanelDraw], textures: [Int: MTLTexture], style: Style, pixelScale: Float) {
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = target
         rp.colorAttachments[0].loadAction = .clear
@@ -343,7 +370,7 @@ final class Renderer {
         enc.setFragmentSamplerState(sampler, index: 0)
         let radius = layout.radius.isFinite ? layout.radius : 0
         for p in panels {
-            let tex = mipTextures[p.index]?.texture
+            let tex = textures[p.index]
             var u = Uniforms(viewProj: viewProj, arcCenter: p.panel.arcCenter, height: p.panel.height,
                              width: p.panel.size.x, panelHeight: p.panel.size.y, radius: radius,
                              distance: layout.distance, cornerRadius: style.cornerRadius, highlight: p.highlight,

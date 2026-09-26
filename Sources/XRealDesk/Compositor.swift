@@ -50,6 +50,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         var viewYawPitch = SIMD2<Float>(0, 0)
         var tracking = false
         var fps: Double = 0
+        /// The display link is pacing wrong; the main thread should restart it.
+        var needsResync = false
     }
 
     private let renderer: Renderer
@@ -99,6 +101,10 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
     private var smart = SmartFollow()
     private var distortionInstalled = false
     private var lastStereo = false
+    private var lastCallbackAt: CFTimeInterval = 0
+    private var lastCallbackCPUMs = 0.0
+    private var hitchReports = 0
+    private var pacingWindowStart: CFTimeInterval = 0, pacingCallbacks = 0, pacingSlow = 0
     /// Neck pivot → midpoint between the eyes, head frame (m): the usual neck model (eyes ~7.5 cm
     /// above and ~8 cm in front of the pivot the head turns about).
     static let neckToEyes = SIMD3<Float>(0, 0.075, -0.08)
@@ -137,6 +143,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
     }
     func setCursorVisible(_ visible: Bool) { cursorStateLock.withLock { $0.visible = visible } }
     var output: Output { outputLock.withLock { $0 } }
+    func clearResyncRequest() { outputLock.withLock { $0.needsResync = false } }
     var isRunning: Bool { current != nil }
 
     /// Frame rate to lock to (the glasses' refresh rate). A fixed rate, not a range: given a range,
@@ -165,7 +172,27 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
 
     // MARK: Render thread
 
+    /// Real-time scheduling for the render thread (as audio and games use): the kernel runs it on
+    /// time even when every core is busy (a big compile starved it into 74 fps). It needs ~0.3 ms
+    /// of CPU per frame; if it ever used far more than it asked for, the kernel would demote it.
+    private func makeRealtime() {
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        let abs = { (ns: Double) in UInt32(ns * Double(tb.denom) / Double(tb.numer)) }
+        let period = 1e9 / Double(targetFPS)
+        var policy = thread_time_constraint_policy_data_t(period: abs(period), computation: abs(1_500_000),
+                                                          constraint: abs(min(period * 0.6, 5_000_000)), preemptible: 1)
+        let count = mach_msg_type_number_t(MemoryLayout<thread_time_constraint_policy_data_t>.size / MemoryLayout<integer_t>.size)
+        let r = withUnsafeMutablePointer(to: &policy) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                thread_policy_set(pthread_mach_thread_np(pthread_self()), thread_policy_flavor_t(THREAD_TIME_CONSTRAINT_POLICY), $0, count)
+            }
+        }
+        if r != KERN_SUCCESS { Log.error("Render thread: real-time scheduling unavailable (\(r))") }
+    }
+
     private func threadMain(_ ctx: RenderThread) {
+        makeRealtime()
         let rl = CFRunLoopGetCurrent()!
         ctx.runLoopLock.withLock { $0 = rl }
         let link = CAMetalDisplayLink(metalLayer: layer)
@@ -200,10 +227,38 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         if lastTarget > 0 {
             let gap = presentAt - lastTarget
             let nominal = 1.0 / Double(targetFPS)
-            if gap > nominal * 1.5 { missedVsyncs += 1 }
+            if gap > nominal * 1.5 {
+                missedVsyncs += 1
+                // Hitch report: was this callback woken late, did the previous frame's CPU work or
+                // GPU wait run long, or did the GPU itself run long?
+                if hitchReports < 8 {
+                    hitchReports += 1
+                    Log.info(String(format: "Hitch: skipped %.0f frame(s); callback %.1f ms after the previous one, arrived with %.1f ms to its deadline; previous frame: CPU %.2f ms, GPU wait %.2f ms, GPU %.2f ms",
+                                    gap / nominal - 1, (now - lastCallbackAt) * 1000, (update.targetTimestamp - now) * 1000,
+                                    lastCallbackCPUMs, renderer.lastWaitMs, renderer.lastGPUMs))
+                }
+            }
             maxTargetGapMs = max(maxTargetGapMs, gap * 1000)
         }
         lastTarget = presentAt
+        // Wrong pacing: callbacks keep coming at half the rate (or less) while arriving with plenty
+        // of time to spare, so it isn't us being slow. Seen for ~20 s after launch, when the link
+        // attached while the glasses were still switching from mirroring to extended.
+        let nominal = 1.0 / Double(targetFPS)
+        pacingCallbacks += 1
+        if lastCallbackAt > 0, now - lastCallbackAt > nominal * 1.7, update.targetTimestamp - now > nominal * 0.6 {
+            pacingSlow += 1
+        }
+        if now - pacingWindowStart >= 0.5 {
+            if pacingCallbacks >= 20, pacingSlow * 10 >= pacingCallbacks * 4 {
+                Log.info(String(format: "Display link paced at %.0f fps instead of %.0f (callbacks early, not late); re-attaching",
+                                Double(pacingCallbacks) / (now - pacingWindowStart), targetFPS))
+                outputLock.withLock { $0.needsResync = true }
+            }
+            pacingWindowStart = now; pacingCallbacks = 0; pacingSlow = 0
+        }
+        lastCallbackAt = now
+        defer { lastCallbackCPUMs = (CACurrentMediaTime() - now) * 1000 }
         // Predict to the middle of the frame's time on screen: the tuned lead was measured at 120 Hz,
         // and a 60 Hz frame stays up twice as long.
         let target = presentAt + cfg.predictionSeconds + max(0, 0.5 / Double(targetFPS) - 0.5 / 120)
@@ -408,7 +463,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
                                     rawRMS / max(stabRMS, 1e-6), SpatialMath.degrees(cfg.stabilityRadians)))
                 }
                 quietRawSum = 0; quietStabSum = 0; quietN = 0; quietRawMax = 0; quietStabMax = 0
-                missedVsyncs = 0; maxTargetGapMs = 0; maxPoseAgeMs = 0; maxHeadStepDeg = 0
+                missedVsyncs = 0; hitchReports = 0; maxTargetGapMs = 0; maxPoseAgeMs = 0; maxHeadStepDeg = 0
             }
         }
         var out = outputLock.withLock { $0 }

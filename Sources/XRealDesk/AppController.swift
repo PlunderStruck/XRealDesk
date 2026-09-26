@@ -56,6 +56,9 @@ final class AppController: ObservableObject {
     private let windows = WindowKeeper()
     private var tickCount = 0
     private var slowSeconds = 0
+    private var lastResync: TimeInterval = 0
+    private var lastWindowLook: TimeInterval = 0
+    private var lastFrontPID: pid_t = 0
     /// Screen whose window should get keyboard focus once you've settled there and stopped typing.
     private var pendingFocus: (screen: Int, display: CGDirectDisplayID, since: CFTimeInterval)?
     private let hotkeys = Hotkeys()
@@ -315,6 +318,7 @@ final class AppController: ObservableObject {
             glassesDisplayName = DisplayConfigurator.name(of: gid)
 
             if DisplayConfigurator.isMirrored(gid) {
+                cursor.guardDisplay = nil   // mirrored bounds are the main screen's: never guard those
                 guard settings.autoExtendDisplay else { return }
                 if Date() < displayUnstableUntil {
                     Log.info("Glasses display is unstable; leaving it alone for now")
@@ -950,18 +954,29 @@ final class AppController: ObservableObject {
 
         // Cursor for the live 120 Hz overlay: current shape (20×/s) and macOS-style hide-while-typing
         // (hidden after a keypress until the mouse moves again).
-        if tickCount % 3 == 0 { updateCursorImage() }
         let sinceMove = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .mouseMoved)
+        // The shape changes as the pointer moves over things; otherwise only rarely (busy spinner).
+        if tickCount % (sinceMove < 0.5 ? 3 : 30) == 0 { updateCursorImage() }
         let sinceKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
         let visible = sinceMove < sinceKey
         if visible != cursorVisible { cursorVisible = visible; compositor.setCursorVisible(visible) }
 
-        // Self-healing: if frames fall well below the glasses' refresh rate for 3 s (e.g. the
-        // display link got tied to the wrong screen), re-sync the renderer.
+        if out.needsResync, !glassesOff, let w = window, w.isVisible, now - lastResync > 3 {
+            lastResync = now
+            compositor.clearResyncRequest()
+            compositor.stop()
+            compositor.start(fps: w.screen?.maximumFramesPerSecond ?? 120)
+        }
+
+        // Self-healing: if frames stay well below the glasses' refresh rate for 10 s (e.g. the
+        // display link got tied to the wrong screen), re-sync the renderer. Not sooner and at most
+        // once a minute: a busy Mac (a big compile) also lowers the rate for a while, and each
+        // restart costs frames of its own.
         if tickCount % 60 == 0, !glassesOff, let w = window, w.isVisible, let target = w.screen?.maximumFramesPerSecond, target > 0, out.fps > 0 {
             if out.fps < Double(target) * 0.85 {
                 slowSeconds += 1
-                if slowSeconds >= 3 {
+                if slowSeconds >= 10, now - lastResync > 60 {
+                    lastResync = now
                     Log.info(String(format: "Rendering at %.0f fps on a %d Hz display; re-syncing", out.fps, target))
                     slowSeconds = 0
                     compositor.stop()
@@ -976,11 +991,25 @@ final class AppController: ObservableObject {
 
         tickCount += 1
         let screensUp = !virtualDisplays.screens.isEmpty && glassesDisplayID != nil || preview
-        if screensUp, tickCount % 15 == 0 { windows.noteFocus(screens: screens) }             // 4×/s
-        if screensUp, settings.windowMemory, tickCount % 90 == 0 {                              // every 1.5 s
-            windows.snapshot(screens: screens, displaysStableFor: displaysStableFor)
-            if tickCount % 1800 == 0 { windows.save() }                                         // every 30 s
+        // Window lists are expensive and go through WindowServer (which also puts our frames on
+        // the glasses), so only look after something that can change them: a click (focus, the end
+        // of a drag), a modifier key (⌘-Tab, ⌘-`, window-manager shortcuts) or another app coming
+        // forward. Plus a slow safety net.
+        if screensUp, tickCount % 15 == 0 {                                                      // check 4×/s
+            let front = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+            let since = now - lastWindowLook
+            let changed = front != lastFrontPID
+                || CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown) < since
+                || CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp) < since
+                || CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .flagsChanged) < since
+            if changed || since > 15 {
+                lastWindowLook = now
+                lastFrontPID = front
+                windows.noteFocus(screens: screens)
+                if settings.windowMemory { windows.snapshot(screens: screens, displaysStableFor: displaysStableFor) }
+            }
         }
+        if screensUp, settings.windowMemory, tickCount % 1800 == 0 { windows.save() }             // every 30 s
         if tickCount % 60 == 0 {
             let trusted = WindowKeeper.isTrusted
             if trusted != accessibilityGranted {
