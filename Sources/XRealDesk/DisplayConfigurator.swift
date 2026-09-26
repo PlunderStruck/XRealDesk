@@ -96,33 +96,10 @@ enum DisplayConfigurator {
         let physical = onlineDisplays().filter { !VirtualDisplayManager.isVirtual($0) && $0 != glasses }
         for id in physical { out[id] = CGDisplayBounds(id).origin }
 
-        // Glasses screens as a grid, same layout you see in the glasses (row 0 = bottom row),
-        // placed against the chosen side of the laptop so the mouse moves across naturally.
-        let cells = ScreenLayout.grid(count: count, rows: rows)
-        let w = pointSize.width, h = pointSize.height
-        let rowCount = (cells.map(\.row).max() ?? 0) + 1
-        let maxCols = cells.map(\.colsInRow).max() ?? 1
-        let gridH = CGFloat(rowCount) * h
-        for (i, id) in virtualIDs.enumerated() where i < cells.count {
-            let c = cells[i]
-            let rowWidth = CGFloat(c.colsInRow) * w
-            let fromTop = CGFloat(rowCount - 1 - c.row)   // visual row index counted from the top
-            var p: CGPoint
-            switch placement {
-            case .above, .custom:
-                p = CGPoint(x: home.midX - rowWidth / 2 + CGFloat(c.col) * w, y: home.minY - gridH + fromTop * h)
-            case .below:
-                p = CGPoint(x: home.midX - rowWidth / 2 + CGFloat(c.col) * w, y: home.maxY + fromTop * h)
-            case .left:
-                p = CGPoint(x: home.minX - CGFloat(maxCols) * w + CGFloat(c.col) * w, y: home.midY - gridH / 2 + fromTop * h)
-            case .right:
-                p = CGPoint(x: home.maxX + CGFloat(c.col) * w, y: home.midY - gridH / 2 + fromTop * h)
-            }
-            if placement == .custom, let o = customOffsets[i] {
-                p = CGPoint(x: home.minX + o.x, y: home.minY + o.y)   // your own arrangement
-            }
-            out[id] = CGPoint(x: p.x.rounded(), y: p.y.rounded())
-        }
+        // Glasses screens as a grid, same layout you see in the glasses, against the chosen side.
+        let origins = Arrangement.gridOrigins(home: home, count: count, rows: rows, screenSize: pointSize,
+                                              placement: placement, customOffsets: customOffsets)
+        for (i, id) in virtualIDs.enumerated() where i < origins.count { out[id] = origins[i] }
         if let glasses {
             // Park the glasses' own display beyond everything else; the cursor guard keeps the mouse off it.
             let minX = out.values.map(\.x).min() ?? home.minX

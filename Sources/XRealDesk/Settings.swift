@@ -3,11 +3,7 @@ import CoreGraphics
 import Combine
 import XRCore
 
-/// Where the glasses screens sit relative to the laptop screen in macOS's display arrangement,
-/// i.e. which edge of the laptop screen the mouse crosses to reach them.
-enum ScreenPlacement: String, CaseIterable, Identifiable {
-    case above, below, left, right, custom
-    var id: String { rawValue }
+extension ScreenPlacement {
     var title: String {
         switch self {
         case .above: return "Above laptop"

@@ -1,3 +1,4 @@
+import XRCore
 import SwiftUI
 
 /// Shared look for the control panel, setup assistant and settings: soft cards, SF Symbols,

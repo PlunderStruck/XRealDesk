@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import simd
 import XRCore
@@ -219,4 +220,78 @@ private func mutate(_ obj: inout [String: Any], rng: inout SplitMix64, depth: In
             }
         }
     }
+}
+
+func arrangementChecks() {
+    print("robustness: display arrangement")
+    func touchLength(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        // Length of the shared edge (0 if they don't touch along an edge).
+        if a.maxX == b.minX || b.maxX == a.minX { return max(0, min(a.maxY, b.maxY) - max(a.minY, b.minY)) }
+        if a.maxY == b.minY || b.maxY == a.minY { return max(0, min(a.maxX, b.maxX) - max(a.minX, b.minX)) }
+        return 0
+    }
+    var overlaps = 0, disconnected = 0, noCrossing = 0, cases = 0, unreachable = 0
+    let homes = [CGRect(x: 0, y: 0, width: 1728, height: 1117), CGRect(x: 0, y: 0, width: 1512, height: 982),
+                 CGRect(x: 0, y: 0, width: 2560, height: 1440)]
+    let sizes = [CGSize(width: 1600, height: 900), CGSize(width: 1920, height: 1080), CGSize(width: 1280, height: 720),
+                 CGSize(width: 3840, height: 1080), CGSize(width: 1920, height: 1200)]
+    for home in homes { for size in sizes { for placement in [ScreenPlacement.above, .below, .left, .right] {
+        for count in 1...8 { for rows in 1...3 {
+            cases += 1
+            let origins = Arrangement.gridOrigins(home: home, count: count, rows: rows, screenSize: size, placement: placement)
+            let rects = origins.map { CGRect(origin: $0, size: size) }
+            let all = [home] + rects
+            // 1. Nothing overlaps (macOS would shove displays around).
+            var bad = false
+            for i in 0..<all.count { for j in (i + 1)..<all.count where all[i].intersection(all[j]).width > 0.5 && all[i].intersection(all[j]).height > 0.5 { bad = true } }
+            if bad { overlaps += 1 }
+            // 2. Everything is one connected arrangement.
+            var seen: Set<Int> = [0], stack = [0]
+            while let k = stack.popLast() {
+                for j in all.indices where !seen.contains(j) && touchLength(all[k], all[j]) > 0 { seen.insert(j); stack.append(j) }
+            }
+            if seen.count != all.count {
+                if disconnected < 4 { print("       disconnected: \(placement) \(count) screens \(rows) rows \(Int(size.width))x\(Int(size.height)) home \(Int(home.width))x\(Int(home.height)): \(rects.map { "(\(Int($0.minX)),\(Int($0.minY)))" }.joined(separator: " "))") }
+                disconnected += 1
+            }
+            // 3. The mouse can cross from the laptop on the chosen side.
+            let crossing = rects.contains { r in
+                switch placement {
+                case .above: return r.maxY == home.minY && touchLength(r, home) > 0
+                case .below: return r.minY == home.maxY && touchLength(r, home) > 0
+                case .left: return r.maxX == home.minX && touchLength(r, home) > 0
+                case .right: return r.minX == home.maxX && touchLength(r, home) > 0
+                case .custom: return true
+                }
+            }
+            if !crossing { noCrossing += 1 }
+            // 4. With up to 2 screens next to the laptop, each of them can be reached directly.
+            let adjacent = rects.filter { r in
+                switch placement {
+                case .above: return r.maxY == home.minY
+                case .below: return r.minY == home.maxY
+                case .left: return r.maxX == home.minX
+                case .right: return r.minX == home.maxX
+                case .custom: return false
+                }
+            }
+            // …when that's geometrically possible: screens centred on the laptop's edge can all touch it
+            // only if together they're no longer than the edge plus a screen on each side.
+            let along = (placement == .above || placement == .below) ? (size.width, home.width) : (size.height, home.height)
+            let possible = CGFloat(adjacent.count) * along.0 < along.1 + 2 * along.0 - 2
+            if adjacent.count <= 2, possible, adjacent.contains(where: { touchLength($0, home) == 0 }) {
+                if unreachable < 4 { print("       unreachable: \(placement) \(count) screens \(rows) rows \(Int(size.width))x\(Int(size.height)) home \(Int(home.width))x\(Int(home.height)): \(rects.map { "(\(Int($0.minX)),\(Int($0.minY)))" }.joined(separator: " "))") }
+                unreachable += 1
+            }
+        } }
+    } } }
+    check(overlaps == 0, "\(cases) arrangements (3 Macs, 5 sizes, 4 sides, 1-8 screens, 1-3 rows): no screens overlap (\(overlaps) did)")
+    check(disconnected == 0, "every arrangement is one connected piece (\(disconnected) weren't)")
+    check(noCrossing == 0, "the mouse can always cross from the Mac on the chosen side (\(noCrossing) couldn't)")
+    check(unreachable == 0, "with one or two screens next to the Mac, the mouse reaches each of them directly (\(unreachable) failed)")
+    let custom = Arrangement.gridOrigins(home: homes[0], count: 3, rows: 1, screenSize: sizes[0], placement: .custom,
+                                         customOffsets: [1: CGPoint(x: 100, y: -900)])
+    check(custom[1] == CGPoint(x: 100, y: -900) && custom.count == 3, "custom placement keeps your own positions")
+    check(Arrangement.gridOrigins(home: homes[0], count: 0, rows: 0, screenSize: sizes[0], placement: .above).isEmpty,
+          "zero screens: nothing to place (no crash)")
 }

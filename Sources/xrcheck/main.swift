@@ -599,6 +599,7 @@ if args.count > 1, args[1] == "live" {
 } else {
     unitChecks()
     robustnessChecks(calibrationJSON: args.count > 1 ? FileManager.default.contents(atPath: args[1]) : nil)
+    arrangementChecks()
     print(failures == 0 ? "\nALL CHECKS PASSED" : "\n\(failures) CHECK(S) FAILED")
     exit(failures == 0 ? 0 : 1)
 }
