@@ -38,6 +38,10 @@ final class Renderer {
         /// 0 = soft (blended with neighbouring subpixels, fewer fringes) … 1 = each channel samples
         /// exactly its own subpixel (sharpest, most color at edges).
         var subpixelStrength: Float = 0.5
+        /// Temporal dithering before the 8-bit output: no banding in dark gradients.
+        var dither = true
+        /// Blend from the sharpest filters to the calmest while the picture moves (no edge crawl).
+        var motionAdaptive = true
         /// Single-pass renderer: each glasses pixel is traced through the lens map onto the screens
         /// and filtered once (instead of drawing a 2x image and warping it).
         var direct = true
@@ -107,6 +111,8 @@ final class Renderer {
     private let directPipeline: MTLRenderPipelineState
     private let dummyTexture: MTLTexture
     private var cursorGammaTexture: MTLTexture?
+    private var motion: Float = 0          // 0 still … 1 moving (render thread)
+    private var frameIndex: UInt32 = 0
     private var mipGamma: [Int: MTLTexture] = [:]
     private let sampler: MTLSamplerState
     private let linearSampler: MTLSamplerState
@@ -241,7 +247,9 @@ final class Renderer {
     /// Returns false if the frame was skipped because the GPU is behind.
     @discardableResult
     func render(drawable: CAMetalDrawable, eyes: [EyeView], layout: ScreenLayout,
-                panels: [PanelDraw], style: Style, snapshotTo snapshotURL: URL? = nil) -> Bool {
+                panels: [PanelDraw], style: Style, motion: Float = 0, snapshotTo snapshotURL: URL? = nil) -> Bool {
+        self.motion = min(max(motion, 0), 1)
+        frameIndex &+= 1
         // If the GPU falls behind, skip the frame rather than queueing latency.
         let waitStart = CACurrentMediaTime()
         let got = !eyes.isEmpty && eyes.count <= 2 && inFlight.wait(timeout: .now() + .milliseconds(8)) == .success
@@ -409,7 +417,8 @@ final class Renderer {
         var toCalibrated: SIMD2<Float>, mapSize: SIMD2<Float>
         var mapStep: Float, lensOn: Float, originX: Float, radius: Float
         var distance: Float, cornerRadius: Float, sharpen: Float, quality: Float
-        var panelCount: Float, subpixel: Float = 0, subpixelStrength: Float = 0.5, pad2: Float = 0
+        var panelCount: Float, subpixel: Float = 0, subpixelStrength: Float = 0.5, frame: Float = 0
+        var motion: Float = 0, dither: Float = 1, pad3: Float = 0, pad4: Float = 0
     }
 
     /// Single pass: every glasses pixel → lens map → ray → curved screen wall → one filtered sample.
@@ -449,7 +458,9 @@ final class Renderer {
                                    lensOn: (style.lensCorrection && map != nil) ? 1 : 0, originX: out.x * Float(i),
                                    radius: radius, distance: layout.distance, cornerRadius: style.cornerRadius,
                                    sharpen: style.sharpen, quality: style.supersample, panelCount: Float(slots.count),
-                                   subpixel: Float(style.subpixel), subpixelStrength: style.subpixelStrength)
+                                   subpixel: Float(style.subpixel), subpixelStrength: style.subpixelStrength,
+                                   frame: Float(frameIndex % 64), motion: style.motionAdaptive ? motion : 0,
+                                   dither: style.dither ? 1 : 0)
             enc.setViewport(MTLViewport(originX: Double(u.originX), originY: 0, width: Double(out.x), height: Double(out.y), znear: 0, zfar: 1))
             enc.setFragmentBytes(&u, length: MemoryLayout<DirectUniforms>.stride, index: 0)
             enc.setFragmentTexture(map ?? dummyTexture, index: 0)
@@ -756,7 +767,8 @@ final class Renderer {
         float2 toCalibrated; float2 mapSize;
         float mapStep; float lensOn; float originX; float radius;
         float distance; float cornerRadius; float sharpen; float quality;
-        float panelCount; float subpixel; float subpixelStrength; float pad2;
+        float panelCount; float subpixel; float subpixelStrength; float frame;
+        float motion; float dither; float pad3; float pad4;
     };
 
     // Eye-local output pixel → point on the layout surface: (arc length, height). false = no hit.
@@ -918,11 +930,20 @@ final class Renderer {
             float alpha = 1.0 - smoothstep(-0.5 * aa, 0.5 * aa, dist);
             if (alpha <= 0.0) continue;
             float3 color;
-            if (p.hasTexture > 0.5 && u.subpixel > 0.5) {
-                color = shadeSubpixel(screens[i], smp, uv, duvx, duvy, int(u.subpixel), u.subpixelStrength);
-                if (u.sharpen > 0.001) color = casSharpen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, color, u.sharpen);
-            } else if (p.hasTexture > 0.5) {
-                color = shadeScreen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, u.sharpen, u.quality);
+            if (p.hasTexture > 0.5) {
+                // Still: the sharpest filters (subpixel, sharpening). Moving: they make edges crawl,
+                // so blend to the calm filter by how fast the picture moves across the display.
+                float3 sharp = 0.0, calm = 0.0;
+                if (u.motion < 0.999) {
+                    if (u.subpixel > 0.5) {
+                        sharp = shadeSubpixel(screens[i], smp, uv, duvx, duvy, int(u.subpixel), u.subpixelStrength);
+                        if (u.sharpen > 0.001) sharp = casSharpen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, sharp, u.sharpen);
+                    } else {
+                        sharp = shadeScreen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, u.sharpen, u.quality);
+                    }
+                }
+                if (u.motion > 0.001) calm = shadeScreen(screens[i], smp, clamp(uv, 0.0, 1.0), duvx, duvy, 0.0, u.quality);
+                color = mix(sharp, calm, u.motion);
             } else {
                 float2 g = abs(fract(uv * float2(16.0, 9.0)) - 0.5);
                 float line = 1.0 - smoothstep(0.46, 0.5, max(g.x, g.y));
@@ -941,7 +962,18 @@ final class Renderer {
             float3 lin = toLinear(color) * (1.0 - p.dim);
             float ring = smoothstep(-2.5 * aa, -1.5 * aa, dist);   // ~1.5 px, on the screen with the cursor
             lin = mix(lin, float3(0.30, 0.62, 1.0), ring * p.highlight * 0.85);
-            return float4(lin * alpha, 1.0);
+            lin *= alpha;
+            if (u.dither > 0.5) {
+                // Temporal dithering (interleaved gradient noise, two taps → triangular, ±1 step of
+                // the 8-bit output, new every frame): gradients stop banding; the eye averages it away.
+                float2 q = in.position.xy + u.frame * float2(5.588238, 5.588238);
+                float n1 = fract(52.9829189 * fract(dot(q, float2(0.06711056, 0.00583715))));
+                float n2 = fract(52.9829189 * fract(dot(q + float2(47.0, 17.0), float2(0.06711056, 0.00583715))));
+                float3 e = select(1.055 * pow(lin, 1.0 / 2.4) - 0.055, 12.92 * lin, lin <= 0.0031308);
+                e = clamp(e + (n1 + n2 - 1.0) / 255.0, 0.0, 1.0);
+                lin = toLinear(e);
+            }
+            return float4(lin, 1.0);
         }
         return float4(0.0, 0.0, 0.0, 1.0);
     }

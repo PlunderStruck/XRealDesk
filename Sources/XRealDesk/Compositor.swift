@@ -115,6 +115,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
     private var lastCallbackCPUMs = 0.0
     private var hitchReports = 0
     private var lastDrawnView: simd_quatf?
+    private var lastFrameView: simd_quatf?
+    private var pictureMotion: Float = 0
     private var lastDrawnKey: [Double] = []
     private var unchangedFrames = 0
     private var shownSeq: [Int: UInt64] = [:]
@@ -472,16 +474,23 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         // Typing with a steady head costs no GPU time at all, which leaves the GPU free for the
         // frames that do change.
         var key: [Double] = [Double(cfg.version), Double(eyes.count), Double(installedMapKey?.hashValue ?? 0), Double(layer.drawableSize.width),
-                             Double(cursorState.seq), cursorState.visible ? 1 : 0]
+                             Double(cursorState.seq), cursorState.visible ? 1 : 0,
+                             (Double(pictureMotion) * 100).rounded()]   // keep drawing until back to fully sharp
         for d in draws {
             key += [Double(d.index), Double(d.frame?.seq ?? 0), Double(d.highlight), (Double(d.dim) * 2048).rounded()]
             if let r = d.cursorRect { key += [Double(r.x), Double(r.y), Double(r.z), Double(r.w)] }
         }
         let viewMoved = lastDrawnView.map { SpatialMath.degrees(($0.inverse * viewRot).angle) > 0.002 } ?? true
+        // How fast the picture moves across the display (the view, after stabilizing): 0 below
+        // 3°/s … 1 above 15°/s. Rises at once, eases back over ~150 ms after you stop.
+        let viewSpeed = lastFrameView.map { SpatialMath.degrees(($0.inverse * viewRot).angle) / max(dt, 1e-3) } ?? 0
+        lastFrameView = viewRot
+        let motionTarget = min(max((viewSpeed - 3) / 12, 0), 1)
+        pictureMotion = motionTarget > pictureMotion ? motionTarget : pictureMotion + (motionTarget - pictureMotion) * min(1, dt / 0.15)
         if !viewMoved, key == lastDrawnKey, pendingSnapshot == nil {
             unchangedFrames += 1
         } else if let target = drawable(), renderer.render(drawable: target, eyes: eyes,
-                                  layout: layout, panels: draws, style: cfg.style, snapshotTo: pendingSnapshot) {
+                                  layout: layout, panels: draws, style: cfg.style, motion: pictureMotion, snapshotTo: pendingSnapshot) {
             pendingSnapshot = nil
             lastDrawnView = viewRot
             lastDrawnKey = key
