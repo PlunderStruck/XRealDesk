@@ -880,11 +880,16 @@ final class Renderer {
         float3 s = tex.sample(smp, uv + duvy, level(0)).rgb;
         float3 e = tex.sample(smp, uv + duvx, level(0)).rgb;
         float3 w = tex.sample(smp, uv - duvx, level(0)).rgb;
-        float3 mn = min(c, min(min(n, s), min(e, w)));
-        float3 mx = max(c, max(max(n, s), max(e, w)));
-        float3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, 1e-4), 0.0, 1.0));
-        float3 wgt = amp * (-1.0 / mix(8.0, 4.0, clamp(amount, 0.0, 1.0)));
-        return clamp((c + (n + s + e + w) * wgt) / (1.0 + 4.0 * wgt), 0.0, 1.0);
+        // One weight from brightness for all three channels: per-channel weights next to subpixel
+        // color turned into colored noise. The peak stays in CAS's range (-1/8 … -1/5), so the
+        // divisor never drops below 0.2 (at -1/4 it reached zero: garbage pixels at 100%).
+        const float3 luma = float3(0.299, 0.587, 0.114);
+        float lc = dot(c, luma), ln = dot(n, luma), ls = dot(s, luma), le = dot(e, luma), lw = dot(w, luma);
+        float mn = min(lc, min(min(ln, ls), min(le, lw)));
+        float mx = max(lc, max(max(ln, ls), max(le, lw)));
+        float amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, 1e-4), 0.0, 1.0));
+        float wgt = amp * (-1.0 / mix(8.0, 5.0, clamp(amount, 0.0, 1.0)));
+        return clamp((c + (n + s + e + w) * wgt) / max(1.0 + 4.0 * wgt, 0.2), 0.0, 1.0);
     }
 
     float3 toLinear(float3 c) { return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045); }
