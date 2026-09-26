@@ -66,6 +66,8 @@ final class AppController: ObservableObject {
     private var trackingCompare = 0
     /// Screen setup whose leaving windows were already moved onto the remaining screens.
     private var evacuatedFor: String?
+    /// Stall watchdog: when rendering last (re)started after a deliberate pause.
+    private var watchdogArmedAt: CFTimeInterval = 0
     /// Capture size relative to the screen's pixels (`set capturescale=`, for measuring).
     private var captureScale: CGFloat = 1
     private var sharpDownsample = true
@@ -1126,9 +1128,12 @@ final class AppController: ObservableObject {
 
         // Watchdog: the picture in the glasses stopped updating. Record where every thread is (so the
         // cause can be found) and start a fresh renderer instead of leaving the glasses frozen.
+        // Time spent paused on purpose (glasses off, renderer stopped) isn't a stall: the clock
+        // starts again when rendering resumes (it once restarted the renderer as you put them on).
+        if glassesOff || !compositor.isRunning || window?.isVisible != true { watchdogArmedAt = now }
         if !glassesOff, let w = window, w.isVisible, compositor.isRunning, out.lastFrameAt > 0,
            let gid = glassesDisplayID, CGDisplayIsAsleep(gid) == 0,
-           now - out.lastFrameAt > 1.5, now - lastStallRecovery > 10 {
+           now - max(out.lastFrameAt, watchdogArmedAt) > 1.5, now - lastStallRecovery > 10 {
             lastStallRecovery = now
             Log.error(String(format: "Renderer stalled (no frame for %.1f s): sampling threads, then restarting it", now - out.lastFrameAt))
             let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/XRealDesk")
@@ -1138,6 +1143,10 @@ final class AppController: ObservableObject {
             sample.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
             sample.arguments = ["\(getpid())", "1", "-mayDie", "-file", dir.appendingPathComponent("stall-\(f.string(from: Date())).txt").path]
             try? sample.run()
+            // Keep only the newest three reports.
+            let old = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+                .filter { $0.hasPrefix("stall-") }.sorted().dropLast(3)
+            old.forEach { try? FileManager.default.removeItem(at: dir.appendingPathComponent($0)) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.recreateRenderer() }
             return
         }
