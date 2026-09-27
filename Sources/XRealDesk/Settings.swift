@@ -194,7 +194,8 @@ final class Settings: ObservableObject {
     /// Rolling scan-out compensation: the glasses light their rows one after another; while you
     /// turn, each row is drawn for where your head is when it lights. 0 off, 1 top→bottom, -1 bottom→top.
     @Published var scanOut: Int { didSet { d.set(scanOut, forKey: "scanOut") } }
-    /// Screens ignore head wobble smaller than this (degrees): typing, breathing. 0 = off.
+    /// Screens ignore head wobble smaller than this (degrees): typing, breathing. 0 = off (recommended:
+    /// any leash makes the screens ride along with small, slow head movements).
     @Published var stabilityDegrees: Double { didSet { d.set(stabilityDegrees, forKey: "stabilityDegrees") } }
     /// Smooth-follow lag time constant, seconds (smaller = snappier).
     @Published var followLag: Double { didSet { d.set(followLag, forKey: "followLag") } }
@@ -261,7 +262,7 @@ final class Settings: ObservableObject {
             "refreshRate": 120, "glassesIsMain": false,
             "screenWidthDegrees": 33.0, "gapDegrees": 1.5, "curve": 0.55, "tiltDegrees": 0.0,
             "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
-            "predictionMs": 14.0, "neckModel": true, "scanOut": 1, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
+            "predictionMs": 14.0, "neckModel": true, "scanOut": 1, "stabilityDegrees": 0.0, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
             "sharpen": 0.35, "subpixel": 2, "subpixelStrength": 1.0, "warmth": 0.0, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
             "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "glassesOffMoveDelay": 10.0, "diagnosticLog": false, "showInDock": true,
         ])
@@ -286,6 +287,12 @@ final class Settings: ObservableObject {
         keyboardFollowsGaze = d.bool(forKey: "keyboardFollowsGaze")
         windowMemory = d.bool(forKey: "windowMemory")
         predictionMs = Self.number(d, "predictionMs", 0, 40)
+        // The old 0.03° default made screens trail small head movements by ~40 ms (measured on real
+        // recordings: world-lock error halves without it). Move anyone still on it to off, once.
+        if !d.bool(forKey: "stabilityOffMigrated") {
+            if abs(Self.number(d, "stabilityDegrees", 0, 0.4) - 0.03) < 0.001 { d.set(0.0, forKey: "stabilityDegrees") }
+            d.set(true, forKey: "stabilityOffMigrated")
+        }
         stabilityDegrees = Self.number(d, "stabilityDegrees", 0, 0.4)
         neckModel = d.bool(forKey: "neckModel")
         scanOut = min(max(d.integer(forKey: "scanOut"), -1), 1)
@@ -353,7 +360,7 @@ final class Settings: ObservableObject {
         renderScale = 2
         lensCorrection = true
         predictionMs = 14
-        stabilityDegrees = 0.03
+        stabilityDegrees = 0
         neckModel = true
         scanOut = 1   // the Air 2 Pro lights its rows top to bottom (user eye test: bottom-to-top made edges lean)
         followLag = 0.3
@@ -371,7 +378,7 @@ final class Settings: ObservableObject {
     /// True when every recommended value is already set.
     var isRecommended: Bool {
         hiDPI && trackingMode == .smart && refreshRate == 120 && renderScale == 2 && lensCorrection && predictionMs == 14
-            && abs(stabilityDegrees - 0.03) < 0.001 && neckModel && scanOut == 1 && cursorFollowsGaze && keyboardFollowsGaze && windowMemory
+            && stabilityDegrees < 0.005 && neckModel && scanOut == 1 && cursorFollowsGaze && keyboardFollowsGaze && windowMemory
             && autoExtendDisplay && mirrorWhenQuitting
     }
 

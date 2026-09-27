@@ -552,6 +552,8 @@ func replay(csv: String, calibrationPath: String) {
     }
     let configs: [Config] = [
         .init(name: "APP CODE (Pose.predicted)", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, appPose: true),
+        .init(name: "APP CODE, stability off", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0, appPose: true),
+        .init(name: "APP CODE, stability 0.01", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.01, appPose: true),
         .init(name: "SHIPPED: always, vel 8ms, cap 1.5x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.5),
         .init(name: "old: fade 2-10, vel 4ms, stab .08", fadeStart: 2, fadeFull: 10, velTau: 0.004, leash: 0.08),
         .init(name: "speed 12-35 (previous)", fadeStart: 12, fadeFull: 35, velTau: 0.008, leash: 0.03),

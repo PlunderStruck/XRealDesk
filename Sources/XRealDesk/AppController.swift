@@ -241,6 +241,7 @@ final class AppController: ObservableObject {
             case "stall":   // test: freeze the render thread for N seconds (the watchdog should recover)
                 self.compositor?.send(.stall(Double(v) ?? 3))
             case "diagnostics": self.settings.diagnosticLog = v == "1"
+            case "stability": if let x = Double(v) { self.settings.stabilityDegrees = min(max(x, 0), 0.4) }
             case "refresh": if let x = Int(v), x == 60 || x == 120 { self.settings.refreshRate = x }
             case "direct":   // 1 = single-pass renderer (default), 0 = two-pass (supersample + warp)
                 self.directRender = v != "0"

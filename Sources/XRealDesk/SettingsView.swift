@@ -252,7 +252,7 @@ struct SettingsView: View {
                     ValueSlider(symbol: "scope", title: "Stability", value: $settings.stabilityDegrees, range: 0...0.4, step: 0.02) {
                         $0 < 0.005 ? "Off" : String(format: "%.2f°", $0)
                     }
-                    Text("Screens ignore head wobble smaller than this (typing, breathing). Recommended: 0.03°.")
+                    Text("Screens ignore head wobble smaller than this, but then drift with small head movements. Recommended: Off.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

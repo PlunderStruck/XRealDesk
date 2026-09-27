@@ -17,7 +17,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         var mode: TrackingMode = .anchored
         var predictionSeconds: Double = 0.014
         /// Stabiliser leash (radians): tiny head motion within this is ignored. 0 = off.
-        var stabilityRadians: Float = SpatialMath.radians(0.12)
+        var stabilityRadians: Float = 0
         var focusDim: Float = 0.25
         var brightness: Float = 1
         var highlightCursor = true
