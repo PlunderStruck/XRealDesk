@@ -148,6 +148,12 @@ final class AppController: ObservableObject {
         hid.logger = { Log.info("[glasses] \($0)") }
         hid.onStateChange = { [weak self] state in self?.glassesStateChanged(state) }
         hid.learner.log = { Log.info($0) }
+        hid.learner.onImproved = { [weak self] gain in
+            DispatchQueue.main.async {
+                guard let self, self.settings.showHUD else { return }
+                self.window?.hostView.showHUD(String(format: "Tracking improved: %.0f%% steadier while moving", gain * 100), seconds: 3)
+            }
+        }
         hid.onDeviceInfo = { [weak self] info in
             self?.deviceInfo = info
             if let serial = info?.serial {

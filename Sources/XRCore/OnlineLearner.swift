@@ -28,6 +28,8 @@ public final class OnlineLearner: @unchecked Sendable {
     }
     public var status: Status { lock.withLock { $0.status } }
     public var log: ((String) -> Void)?
+    /// Called (background queue) when an improvement is adopted: how much steadier while moving (0…1).
+    public var onImproved: ((Float) -> Void)?
 
     static let horizons = HeadPredictor.horizonsMs.map { Int($0) }   // ms
     static let nf = HeadPredictor.featureCount
@@ -303,6 +305,7 @@ public final class OnlineLearner: @unchecked Sendable {
                 HeadPredictor.learned = candidate
                 st.adoptions += 1
                 save(candidate, minutes: st.minutesLearned, adoptions: st.adoptions)
+                onImproved?(1 - cand.moving / max(cur.moving, 1e-9))
                 log?(String(format: "Tracking improved from your head motion: jitter while moving %.3f → %.3f px, still %.3f → %.3f px (%.0f min learned)",
                             cur.moving * 1920 / 46, cand.moving * 1920 / 46, cur.still * 1920 / 46, cand.still * 1920 / 46, st.minutesLearned))
             }
