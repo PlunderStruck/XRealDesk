@@ -63,6 +63,9 @@ final class AppController: ObservableObject {
     private var evacuatedFor: String?
     /// Stall watchdog: when rendering last (re)started after a deliberate pause.
     private var watchdogArmedAt: CFTimeInterval = 0
+    /// Just-in-time frame start (`set jit=1`): measured to gain < 1 ms here (the GPU is shared with
+    /// WindowServer, so there's little slack before the deadline), so off by default.
+    private var lateStart = false
     /// Record window positions at the next quiet moment (e.g. after the first check following a restore).
     private var needsWindowSnapshot = true
     /// Capture size relative to the screen's pixels (`set capturescale=`, for measuring).
@@ -254,6 +257,12 @@ final class AppController: ObservableObject {
                 }
             case "worn":    // test hook: as if the glasses' wear sensor reported off (0) / on (1)
                 self.wornChanged(v != "0")
+            case "jit":     // just-in-time frame start: 1 on (default), 0 off
+                self.lateStart = v != "0"
+                self.pushConfig()
+            case "scan":    // rolling scan-out compensation: 0 off, 1 rows lit top to bottom, -1 bottom to top
+                if let x = Int(v), (-1...1).contains(x) { self.settings.scanOut = x }
+                self.hud(["Scan compensation: bottom → top", "Scan compensation off", "Scan compensation: top → bottom"][self.settings.scanOut + 1])
             case "steady":  // steady tracking: 1 = on (default), 0 = the previous tracking, for comparing
                 self.hid.steadyTracking = v != "0"
                 self.hud(self.hid.steadyTracking ? "Steady tracking on" : "Steady tracking off (old)")
@@ -1225,7 +1234,8 @@ final class AppController: ObservableObject {
         c.style = Renderer.Style(sharpen: Float(settings.sharpen), cornerRadius: Float(settings.cornerRadius),
                                  supersample: Float(settings.renderScale), lensCorrection: settings.lensCorrection,
                                  sharpDownsample: sharpDownsample, subpixel: settings.subpixel,
-                                 subpixelStrength: Float(settings.subpixelStrength), white: settings.whitePoint, direct: directRender)
+                                 subpixelStrength: Float(settings.subpixelStrength), white: settings.whitePoint,
+                                 scanDirection: Float(settings.scanOut), direct: directRender)
         c.mode = settings.trackingMode
         c.predictionSeconds = settings.predictionMs / 1000
         c.stabilityRadians = SpatialMath.radians(Float(settings.stabilityDegrees))
@@ -1238,6 +1248,7 @@ final class AppController: ObservableObject {
         c.rollRadians = SpatialMath.radians(Float(settings.rollDegrees))
         c.flat3D = !stereoDepth
         c.neckModel = settings.neckModel
+        c.lateStart = lateStart
         c.preview = preview
         return c
     }

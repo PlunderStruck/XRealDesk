@@ -40,6 +40,8 @@ final class Renderer {
         var subpixelStrength: Float = 0.5
         /// White-point multipliers (linear light) from the Warmth setting.
         var white = SIMD3<Float>(1, 1, 1)
+        /// Rolling scan-out compensation: 0 off, +1 the display lights rows top to bottom, -1 bottom to top.
+        var scanDirection: Float = 0
         /// Temporal dithering before the 8-bit output: no banding in dark gradients.
         var dither = true
         /// Blend from the sharpest filters to the calmest while the picture moves (no edge crawl).
@@ -114,6 +116,7 @@ final class Renderer {
     private let dummyTexture: MTLTexture
     private var cursorGammaTexture: MTLTexture?
     private var motion: Float = 0          // 0 still … 1 moving (render thread)
+    private var scanRotation = SIMD3<Float>(repeating: 0)   // eye-frame head rotation over one scan-out
     private var frameIndex: UInt32 = 0
     private var mipGamma: [Int: MTLTexture] = [:]
     private let sampler: MTLSamplerState
@@ -249,8 +252,11 @@ final class Renderer {
     /// Returns false if the frame was skipped because the GPU is behind.
     @discardableResult
     func render(drawable: CAMetalDrawable, eyes: [EyeView], layout: ScreenLayout,
-                panels: [PanelDraw], style: Style, motion: Float = 0, snapshotTo snapshotURL: URL? = nil) -> Bool {
+                panels: [PanelDraw], style: Style, motion: Float = 0, scan: SIMD3<Float> = .zero,
+                snapshotTo snapshotURL: URL? = nil) -> Bool {
         self.motion = min(max(motion, 0), 1)
+        let scanOK = scan.x.isFinite && scan.y.isFinite && scan.z.isFinite && simd_length(scan) < 0.1
+        self.scanRotation = scanOK ? scan : .zero
         frameIndex &+= 1
         // If the GPU falls behind, skip the frame rather than queueing latency.
         let waitStart = CACurrentMediaTime()
@@ -448,6 +454,11 @@ final class Renderer {
                                    frame: Float(frameIndex % 64), motion: style.motionAdaptive ? motion : 0,
                                    dither: style.dither ? 1 : 0,
                                    white: SIMD4(style.white, 1))
+            if style.scanDirection != 0 {
+                u.scanRows = e.intrinsics.calibrated.y
+                u.scanDir = style.scanDirection
+                u.scan = SIMD4(scanRotation, 0)
+            }
             enc.setViewport(MTLViewport(originX: Double(u.originX), originY: 0, width: Double(out.x), height: Double(out.y), znear: 0, zfar: 1))
             enc.setFragmentBytes(&u, length: MemoryLayout<RendererShaders.DirectUniforms>.stride, index: 0)
             enc.setFragmentTexture(map ?? dummyTexture, index: 0)

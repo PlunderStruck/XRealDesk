@@ -136,6 +136,31 @@ func shaderChecks() {
         }
     }
 
+    print("renderer shader: rolling scan-out compensation")
+    do {
+        // A 1° yaw during the scan-out: rows lit later are drawn for the head turned further, so a
+        // vertical screen edge shifts by the matching amount between upper and lower rows.
+        let layout = ScreenLayout(count: 1, rows: 1, widthDegrees: 33, aspect: 16.0 / 9, gapDegrees: 1.5, curve: 0)
+        func leftEdge(_ px: [SIMD4<Float>], row: Int) -> Float? {
+            (0..<outW).first { px[row * outW + $0].x + px[row * outW + $0].y + px[row * outW + $0].z > 0.05 }.map(Float.init)
+        }
+        let a: Float = SpatialMath.radians(1)
+        let still = render(Scene(layout: layout), screens: bigScreens) { $0.dither = 0 }
+        let comp = render(Scene(layout: layout), screens: bigScreens) { $0.dither = 0; $0.scanRows = 1080; $0.scanDir = 1; $0.scan = SIMD4(0, a, 0, 0) }
+        let flipped = render(Scene(layout: layout), screens: bigScreens) { $0.dither = 0; $0.scanRows = 1080; $0.scanDir = -1; $0.scan = SIMD4(0, a, 0, 0) }
+        let top = outH / 5 + 10, bottom = outH * 4 / 5 - 10
+        if let s0 = leftEdge(still, row: top), let s1 = leftEdge(still, row: bottom),
+           let c0 = leftEdge(comp, row: top), let c1 = leftEdge(comp, row: bottom),
+           let f0 = leftEdge(flipped, row: top), let f1 = leftEdge(flipped, row: bottom) {
+            let expected = 2697 * Float(outW) / 1920 * a * Float(bottom - top) / Float(outH)
+            check(abs(s1 - s0) < 1.01, "no compensation: the edge is straight (\(s1 - s0) px)")
+            check(abs((c1 - c0) - expected) < 1.6, String(format: "1° over the scan-out shears the edge by %.1f px (expected %.1f)", c1 - c0, expected))
+            check(abs((f1 - f0) + (c1 - c0)) < 1.6, "bottom-to-top scan shears the other way")
+            let mid = outH / 2
+            check(leftEdge(comp, row: mid).map { abs($0 - (leftEdge(still, row: mid) ?? -99)) < 1.01 } ?? false, "the middle row (the predicted moment) doesn't move")
+        } else { check(false, "screen edge visible for the scan check") }
+    }
+
     print("renderer shader: geometry")
     var geomBad: [String] = []
     for (name, curve, tilt) in [("curved", Float(0.55), Float(0)), ("flat", 0, 0), ("wrapped", 1, 0), ("raised 12°", 0.55, 12)] {

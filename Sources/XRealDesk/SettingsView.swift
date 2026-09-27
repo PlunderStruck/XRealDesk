@@ -231,6 +231,13 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
+                Picker("Scan compensation", selection: $settings.scanOut) {
+                    Text("Off").tag(0)
+                    Text("Top to bottom").tag(1)
+                    Text("Bottom to top").tag(-1)
+                }
+                Text("The glasses light the picture one row after another. While you turn, this draws each row for where your head is at that moment, so vertical edges stay straight instead of leaning. Pick the option where edges look most solid when you shake your head.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("Neck model", isOn: $settings.neckModel)
                 Text("When you turn or nod, your eyes swing around your neck. With this on, the screens shift the way real objects would, which makes them feel more solidly in place. Turn it off if the screens seem to drift as you turn.")
                     .font(.caption).foregroundStyle(.secondary)

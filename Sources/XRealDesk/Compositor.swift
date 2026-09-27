@@ -29,6 +29,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         /// Side-by-side output but the same flat picture in both eyes (no depth). Default: depth felt
         /// warpy on head turns (60 Hz, rotation-only tracking) while the flat picture felt clean.
         var flat3D = true
+        /// Just-in-time frames: wait until the latest safe moment before reading the head pose.
+        var lateStart = true
         /// Flat pictures (2D, or the same picture in both eyes) also get the neck model, scaled to
         /// where the eyes converge on them (the displays' factory convergence, ~3.6 m).
         var neckModel = true
@@ -120,6 +122,18 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
     private var lastDrawnView: simd_quatf?
     private var lastFrameView: simd_quatf?
     private var pictureMotion: Float = 0
+    // Just-in-time frames (render thread).
+    private var jitGPU = [Double](repeating: 0.004, count: 240), jitIndex = 0, jitGPUp98 = 0.004
+    private var jitBackoff = 0.0, lastLateWait = 0.0, lateWaitSum = 0.0
+    private var lastGPUSeen = 0.0
+
+    /// Precise sleep on the real-time render thread (mach clock, same as CACurrentMediaTime).
+    private static func wait(until t: CFTimeInterval) {
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        mach_wait_until(UInt64(t * 1e9 * Double(tb.denom) / Double(tb.numer)))
+    }
+    private var scanRotation = SIMD3<Float>(repeating: 0)
     private var lastDrawnKey: [Double] = []
     private var unchangedFrames = 0
     private var shownSeq: [Int: UInt64] = [:]
@@ -267,6 +281,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
             let nominal = 1.0 / Double(targetFPS)
             if gap > nominal * 1.5 {
                 missedVsyncs += 1
+                if lastLateWait > 0 { jitBackoff = min(jitBackoff + 0.001, 0.004) }   // late-start may be too greedy: back off
                 // Hitch report: was this callback woken late, did the previous frame's CPU work or
                 // GPU wait run long, or did the GPU itself run long?
                 if hitchReports < 8 {
@@ -299,14 +314,33 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         defer { lastCallbackCPUMs = (CACurrentMediaTime() - now) * 1000 }
         // Predict to the middle of the frame's time on screen: the tuned lead was measured at 120 Hz,
         // and a 60 Hz frame stays up twice as long.
+        // Just in time: the frame must be done by `deadline`, and our GPU work usually takes a
+        // fraction of that. Wait until the latest safe moment (recent worst-case GPU time + CPU +
+        // margin, backing off after any missed refresh) so the head pose is as fresh as possible:
+        // prediction error grows with the square of how far ahead it has to guess.
+        lastLateWait = 0
+        var sampleNow = now
+        if cfg.lateStart {
+            let budget = min(max(jitGPUp98 + 0.0006 + 0.0015 + jitBackoff, 0.0025), 0.008)
+            let wakeAt = deadline - budget
+            if wakeAt - now > 0.0003, wakeAt - now < 0.012 {
+                Compositor.wait(until: wakeAt)
+                sampleNow = CACurrentMediaTime()
+                lastLateWait = sampleNow - now
+            }
+        }
+        lateWaitSum += lastLateWait
+        jitBackoff = max(0, jitBackoff - Double(dt) * 0.0001)   // relax slowly (0.1 ms per second)
         let target = presentAt + cfg.predictionSeconds + max(0, 0.5 / Double(targetFPS) - 0.5 / 120)
-        horizonSum += target - now; horizonN += 1
+        horizonSum += target - sampleNow; horizonN += 1
         presentSum += presentAt - now; deadlineSum += deadline - now
         var head = lastHead
         var tracking = false
         var headSpeed: Float = 0
+        var headRate = SIMD3<Float>(repeating: 0)
         if let pose = hid.pose, now - pose.hostTime < 0.5 {
             headSpeed = simd_length(pose.angularVelocity)
+            headRate = pose.angularVelocity
             maxPoseAgeMs = max(maxPoseAgeMs, (now - pose.hostTime) * 1000)
             head = pose.predicted(to: target)
             tracking = true
@@ -424,10 +458,20 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         // (~0.5° on a 20° turn) — a faint swim. The neck offset is scaled so the parallax matches
         // 3.6 m while the geometry stays at the layout's distance. Not in head-locked mode, where
         // the screens are meant to move with the head.
+        // Applied as the equivalent small rotation, not as moving the viewpoint: moving the viewpoint
+        // off the centre of a curved layout made nearer parts shift more than farther ones, which
+        // with no depth cues (both eyes see the same image) reads as the screens warping. A rotation
+        // gives the exact parallax where you look and distorts nothing.
         var flatView = simd_float4x4(viewRot)
         if cfg.neckModel, cfg.mode != .headLocked, !cfg.preview {
-            let neck = Compositor.neckToEyes * (layout.distance / (cal.convergenceDistance ?? 3.6))
-            flatView = SpatialMath.translation(-neck) * simd_float4x4(viewRot) * SpatialMath.translation(neck)
+            let headInLayout = viewNoRoll.inverse                 // head orientation in the layout frame
+            let t = headInLayout.act(Compositor.neckToEyes) - Compositor.neckToEyes   // eye offset (m)
+            let u = headInLayout.act(SIMD3<Float>(0, 0, -1))      // where you look
+            let delta = simd_cross(t, u) / (cal.convergenceDistance ?? 3.6)
+            let angle = simd_length(delta)
+            if angle > 1e-7, angle < 0.1 {
+                flatView = simd_float4x4(viewRot * simd_quatf(angle: angle, axis: delta / angle))
+            }
         }
         if stereo && (cfg.flat3D || cal.eyes.count != 2) {
             let flat = Renderer.EyeView(intrinsics: intrinsics, view: flatView, map: 0)
@@ -502,12 +546,30 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         lastFrameView = viewRot
         let motionTarget = min(max((viewSpeed - 3) / 12, 0), 1)
         pictureMotion = motionTarget > pictureMotion ? motionTarget : pictureMotion + (motionTarget - pictureMotion) * min(1, dt / 0.15)
+        // Rolling scan-out: how far the view turns while the display lights the picture top to
+        // bottom (one refresh). Only when the view really moves (the stabiliser holds it still for
+        // tiny wobble), never in head-locked mode (the screens move with the head there).
+        if cfg.style.scanDirection != 0, tracking, cfg.mode != .headLocked {
+            let t = min(max((viewSpeed - 2) / 6, 0), 1)
+            let roll = simd_quatf(angle: -cfg.rollRadians, axis: SIMD3(0, 0, 1))
+            scanRotation = roll.act(headRate) * Float(t * t * (3 - 2 * t)) / Float(targetFPS)
+        } else {
+            scanRotation = .zero
+        }
         if !viewMoved, key == lastDrawnKey, pendingSnapshot == nil {
             unchangedFrames += 1
         } else if let target = drawable(), renderer.render(drawable: target, eyes: eyes,
-                                  layout: layout, panels: draws, style: cfg.style, motion: pictureMotion, snapshotTo: pendingSnapshot) {
+                                  layout: layout, panels: draws, style: cfg.style, motion: pictureMotion, scan: scanRotation,
+                                  snapshotTo: pendingSnapshot) {
             pendingSnapshot = nil
             lastDrawnView = viewRot
+            // Recent GPU frame times for the just-in-time budget (the value of the last finished frame).
+            let g = renderer.lastGPUMs / 1000
+            if g > 0, g != lastGPUSeen {
+                lastGPUSeen = g
+                jitGPU[jitIndex] = g; jitIndex = (jitIndex + 1) % jitGPU.count
+                if jitIndex % 30 == 0 { jitGPUp98 = jitGPU.sorted()[jitGPU.count * 98 / 100] }
+            }
             lastDrawnKey = key
             // Capture → glasses latency for screens showing a new frame.
             for d in draws {
@@ -531,13 +593,14 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
             if statsSeconds % 10 == 0 {
                 let st = renderer.takeStats()
                 let gpuTimes = renderer.takeGPUTimes()
-                Log.info(String(format: "Frames: %.0f fps (render thread), rendered %d, skipped busy %d, missed vsyncs %d, max frame gap %.1f ms, max pose age %.1f ms, max head step %.2f°, jitter rms %.4f° max %.3f°, GPU %.2f ms avg / %.2f ms max (%.1fx%@), IMU %.0f Hz, predicting %.1f ms ahead (shown in %.1f ms, deadline %.1f ms)",
+                Log.info(String(format: "Frames: %.0f fps (render thread), rendered %d, skipped busy %d, missed vsyncs %d, max frame gap %.1f ms, max pose age %.1f ms, max head step %.2f°, jitter rms %.4f° max %.3f°, GPU %.2f ms avg / %.2f ms max (%.1fx%@), IMU %.0f Hz, predicting %.1f ms ahead (shown in %.1f ms, deadline %.1f ms, started %.1f ms late, GPU p98 %.1f ms, backoff %.1f ms)",
                                 fps!, st.rendered, st.skippedBusy, missedVsyncs, maxTargetGapMs, maxPoseAgeMs, maxHeadStepDeg,
                                 sqrt(jitterSum / Double(max(jitterN, 1))), jitterMax,
                                 gpuTimes.avg, gpuTimes.max, cfg.style.supersample, cfg.style.lensCorrection ? ", lens corrected" : "",
                                 hid.sampleRate, horizonSum / Double(max(horizonN, 1)) * 1000,
-                                presentSum / Double(max(horizonN, 1)) * 1000, deadlineSum / Double(max(horizonN, 1)) * 1000))
-                horizonSum = 0; horizonN = 0; presentSum = 0; deadlineSum = 0
+                                presentSum / Double(max(horizonN, 1)) * 1000, deadlineSum / Double(max(horizonN, 1)) * 1000,
+                                lateWaitSum / Double(max(horizonN, 1)) * 1000, jitGPUp98 * 1000, jitBackoff * 1000))
+                horizonSum = 0; horizonN = 0; presentSum = 0; deadlineSum = 0; lateWaitSum = 0
                 var capture: [String] = []
                 for (i, c) in capturesLock.withLock({ $0 }).sorted(by: { $0.key < $1.key }) {
                     let s = c.takeStats()

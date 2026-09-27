@@ -22,8 +22,13 @@ public enum RendererShaders {
         public var mapStep: Float, lensOn: Float, originX: Float, radius: Float
         public var distance: Float, cornerRadius: Float, sharpen: Float, quality: Float
         public var panelCount: Float, subpixel: Float, subpixelStrength: Float, frame: Float
-        public var motion: Float, dither: Float, pad3: Float = 0, pad4: Float = 0
+        /// Rolling scan-out compensation: calibrated picture height in pixels (0 = off) and the scan
+        /// direction (+1 top to bottom, -1 bottom to top).
+        public var motion: Float, dither: Float, scanRows: Float = 0, scanDir: Float = 1
         public var white: SIMD4<Float>
+        /// How far the head turns (eye frame, rotation vector in radians) while the display lights
+        /// the picture from its first row to its last.
+        public var scan = SIMD4<Float>(0, 0, 0, 0)
 
         public init(invView: simd_float4x4, focal: SIMD2<Float>, center: SIMD2<Float>, toCalibrated: SIMD2<Float>,
                     mapSize: SIMD2<Float>, mapStep: Float, lensOn: Float, originX: Float, radius: Float, distance: Float,
@@ -263,8 +268,9 @@ public enum RendererShaders {
         float mapStep; float lensOn; float originX; float radius;
         float distance; float cornerRadius; float sharpen; float quality;
         float panelCount; float subpixel; float subpixelStrength; float frame;
-        float motion; float dither; float pad3; float pad4;
+        float motion; float dither; float scanRows; float scanDir;
         float4 white;   // white-point (warmth) multipliers, linear light
+        float4 scan;    // head rotation (eye frame, radians) over one scan-out
     };
 
     // Eye-local output pixel → point on the layout surface: (arc length, height). false = no hit.
@@ -273,6 +279,13 @@ public enum RendererShaders {
         float2 ideal = pc;
         if (u.lensOn > 0.5) ideal = map.sample(lin, (pc / u.mapStep + 0.5) / u.mapSize).xy;
         float3 dcam = float3((ideal.x - u.center.x) / u.focal.x, (u.center.y - ideal.y) / u.focal.y, -1.0);
+        // The display lights its rows one after another, not all at once: while the head turns, a
+        // row lit later must be drawn for where the head will be then. The pose is predicted for
+        // the middle row; each row's ray turns by its share of the scan-out's rotation.
+        if (u.scanRows > 0.0) {
+            float row = u.scanDir > 0.0 ? pc.y : u.scanRows - pc.y;
+            dcam += (row / u.scanRows - 0.5) * cross(u.scan.xyz, dcam);
+        }
         float3 o = (u.invView * float4(0.0, 0.0, 0.0, 1.0)).xyz;
         float3 d = normalize((u.invView * float4(dcam, 0.0)).xyz);
         if (u.radius > 0.0) {

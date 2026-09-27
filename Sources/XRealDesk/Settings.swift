@@ -191,6 +191,9 @@ final class Settings: ObservableObject {
     /// Neck model: turning or nodding swings your eyes around your neck, and the screens shift the
     /// way real objects at their distance would.
     @Published var neckModel: Bool { didSet { d.set(neckModel, forKey: "neckModel") } }
+    /// Rolling scan-out compensation: the glasses light their rows one after another; while you
+    /// turn, each row is drawn for where your head is when it lights. 0 off, 1 top→bottom, -1 bottom→top.
+    @Published var scanOut: Int { didSet { d.set(scanOut, forKey: "scanOut") } }
     /// Screens ignore head wobble smaller than this (degrees): typing, breathing. 0 = off.
     @Published var stabilityDegrees: Double { didSet { d.set(stabilityDegrees, forKey: "stabilityDegrees") } }
     /// Smooth-follow lag time constant, seconds (smaller = snappier).
@@ -258,7 +261,7 @@ final class Settings: ObservableObject {
             "refreshRate": 120, "glassesIsMain": false,
             "screenWidthDegrees": 33.0, "gapDegrees": 1.5, "curve": 0.55, "tiltDegrees": 0.0,
             "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
-            "predictionMs": 14.0, "neckModel": true, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
+            "predictionMs": 14.0, "neckModel": true, "scanOut": 0, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
             "sharpen": 0.35, "subpixel": 2, "subpixelStrength": 1.0, "warmth": 0.0, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
             "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "glassesOffMoveDelay": 10.0, "diagnosticLog": false, "showInDock": true,
         ])
@@ -285,6 +288,7 @@ final class Settings: ObservableObject {
         predictionMs = Self.number(d, "predictionMs", 0, 40)
         stabilityDegrees = Self.number(d, "stabilityDegrees", 0, 0.4)
         neckModel = d.bool(forKey: "neckModel")
+        scanOut = min(max(d.integer(forKey: "scanOut"), -1), 1)
         followLag = Self.number(d, "followLag", 0.05, 1.0)
         flickSensitivity = Self.number(d, "flickSensitivity", 0, 1)
         smartFlick = d.bool(forKey: "smartFlick")
