@@ -43,6 +43,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         /// Scan-out compensation strength: the fraction of a refresh the glasses take to light the
         /// picture top to bottom. Blind A/B while panning: 40% beat 30/50/70/100/130% and off.
         var scanScale: Float = 0.4
+
         /// Flat pictures (2D, or the same picture in both eyes) also get the neck model, scaled to
         /// where the eyes converge on them (the displays' factory convergence, ~3.6 m).
         var neckModel = true
@@ -118,6 +119,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
 
     // Render-thread-only state.
     private var anchor = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+    /// Frame trace: the latest measured (unpredicted) head orientation and when it was sampled.
+    private var traceNow: (q: simd_quatf, t: Double)?
     private var anchorFrom = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
     private var anchorTo = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
     private var anchorAnimStart: CFTimeInterval = 0
@@ -452,6 +455,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
             headRate = pose.angularVelocity
             maxPoseAgeMs = max(maxPoseAgeMs, (now - pose.hostTime) * 1000)
             head = pose.predicted(to: target)
+            if traceUntil > 0 { traceNow = (pose.orientation, pose.hostTime) }
             tracking = true
             if needsRecenter && pose.warmedUp {
                 needsRecenter = false
@@ -703,15 +707,22 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         // Frame trace (`set trace=N`): every callback for N seconds, to find stutters in motion.
         if traceUntil > 0 {
             let (ry, rp) = SpatialMath.yawPitch(of: rawHead)
-            traceRows.append(String(format: "%.6f,%.6f,%.6f,%d,%.5f,%.5f,%.5f,%.5f,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f",
+            // The measured head, as the same view direction the frame was drawn with (layout frame).
+            var nowYP = SIMD2<Float>(.nan, .nan), nowT = 0.0
+            if let n = traceNow {
+                let v = n.q.inverse * anchor
+                let (ny, np) = SpatialMath.yawPitch(of: layout.tiltRotation.inverse * v.inverse)
+                nowYP = SIMD2(SpatialMath.degrees(ny), SpatialMath.degrees(np)); nowT = n.t
+            }
+            traceRows.append(String(format: "%.6f,%.6f,%.6f,%d,%.5f,%.5f,%.5f,%.5f,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.5f,%.5f,%.6f",
                                     now, presentAt, deadline, renderedThisFrame ? 1 : 0,
                                     SpatialMath.degrees(vy), SpatialMath.degrees(vp), SpatialMath.degrees(ry), SpatialMath.degrees(rp),
                                     SpatialMath.degrees(headSpeed), pictureMotion, renderer.lastGPUMs, lastCallbackCPUMs, lastLateWait * 1000,
-                                    lateness * 1000))
+                                    lateness * 1000, nowYP.x, nowYP.y, nowT))
             if now > traceUntil {
                 let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/XRealDesk")
                 let url = dir.appendingPathComponent("frames.csv")
-                let text = "t,present,deadline,rendered,viewYaw,viewPitch,headYaw,headPitch,headSpeed,motion,gpuMs,cpuMs,lateMs,predictedLateMs\n" + traceRows.joined(separator: "\n") + "\n"
+                let text = "t,present,deadline,rendered,viewYaw,viewPitch,headYaw,headPitch,headSpeed,motion,gpuMs,cpuMs,lateMs,predictedLateMs,nowYaw,nowPitch,nowT\n" + traceRows.joined(separator: "\n") + "\n"
                 try? text.write(to: url, atomically: true, encoding: .utf8)
                 let presented = presentedLock.withLock { $0 }
                 let ptext = "target,actual\n" + presented.map { String(format: "%.6f,%.6f", $0.0, $0.1) }.joined(separator: "\n") + "\n"

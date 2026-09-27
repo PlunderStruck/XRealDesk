@@ -98,6 +98,7 @@ final class AppController: ObservableObject {
     private var captureThrottle = false
     /// Scan-out compensation strength (`set scanscale=0.4`; see Compositor.Config.scanScale).
     private var scanScale: Float = 0.4
+
     private let hotkeys = Hotkeys()
     private var cancellables = Set<AnyCancellable>()
 
