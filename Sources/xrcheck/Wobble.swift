@@ -140,3 +140,36 @@ func dumpCalibrated(csv: String, calibrationPath: String, out: String) {
     try? lines.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8)
     print("wrote \(lines.count - 1) samples to \(out)")
 }
+
+/// Local twist and scale of each lens-correction map across the picture (degrees / %), and each
+/// eye's display roll: what the flat 2D picture's averaged map does to each eye.
+func lensInfo(calibrationPath: String) {
+    guard let data = FileManager.default.contents(atPath: calibrationPath),
+          let cal = GlassesCalibration.parse(json: data) else { print("can't read calibration"); return }
+    let res = cal.resolution
+    var maps: [(String, DistortionGrid)] = []
+    if let a = cal.distortion { maps.append(("average", a)) }
+    for (i, e) in cal.eyes.enumerated() { if let d = e.distortion { maps.append(("eye \(i)", d)) } }
+    for (i, e) in cal.eyes.enumerated() {
+        let (y, p) = SpatialMath.yawPitch(of: e.rotation)
+        let fwd = e.rotation.act(SIMD3<Float>(0, 0, -1)), up = e.rotation.act(SIMD3<Float>(0, 1, 0))
+        _ = fwd
+        print(String(format: "eye %d display: yaw %.2f° pitch %.2f° roll %.2f°", i, SpatialMath.degrees(y), SpatialMath.degrees(p),
+                     SpatialMath.degrees(atan2(-up.x, up.y))))
+    }
+    let pts: [(String, SIMD2<Float>)] = [("centre", SIMD2(0.5, 0.5)), ("left", SIMD2(0.1, 0.5)), ("right", SIMD2(0.9, 0.5)),
+                                          ("top", SIMD2(0.5, 0.1)), ("bottom", SIMD2(0.5, 0.9)),
+                                          ("top-left", SIMD2(0.1, 0.1)), ("top-right", SIMD2(0.9, 0.1)),
+                                          ("bottom-left", SIMD2(0.1, 0.9)), ("bottom-right", SIMD2(0.9, 0.9))]
+    for (name, g) in maps {
+        var line = "\(name.padding(toLength: 8, withPad: " ", startingAt: 0)) twist°:"
+        for (pn, f) in pts {
+            let p = f * res, h: Float = 4
+            let dx = (g.sample(p.x + h, p.y) - g.sample(p.x - h, p.y)) / (2 * h)
+            let dy = (g.sample(p.x, p.y + h) - g.sample(p.x, p.y - h)) / (2 * h)
+            let twist = SpatialMath.degrees(atan2(dx.y - dy.x, dx.x + dy.y))
+            line += String(format: " %@ %+.2f", pn, twist)
+        }
+        print(line)
+    }
+}

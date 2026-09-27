@@ -40,6 +40,9 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         var handoffOffset: Double?
         /// Just-in-time frames: wait until the latest safe moment before reading the head pose.
         var lateStart = true
+        /// Scan-out compensation strength: the fraction of a refresh the glasses take to light the
+        /// picture top to bottom. Blind A/B while panning: 40% beat 30/50/70/100/130% and off.
+        var scanScale: Float = 0.4
         /// Flat pictures (2D, or the same picture in both eyes) also get the neck model, scaled to
         /// where the eyes converge on them (the displays' factory convergence, ~3.6 m).
         var neckModel = true
@@ -663,7 +666,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         if cfg.style.scanDirection != 0, tracking, cfg.mode != .headLocked {
             let t = min(max((viewSpeed - 2) / 6, 0), 1)
             let roll = simd_quatf(angle: -cfg.rollRadians, axis: SIMD3(0, 0, 1))
-            scanRotation = roll.act(headRate) * Float(t * t * (3 - 2 * t)) / Float(targetFPS)
+            scanRotation = roll.act(headRate) * Float(t * t * (3 - 2 * t)) * cfg.scanScale / Float(targetFPS)
         } else {
             scanRotation = .zero
         }

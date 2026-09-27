@@ -96,6 +96,8 @@ final class AppController: ObservableObject {
     /// screen showed its content up to 0.1 s old, then snapped to current (a hop); in a blind A/B
     /// the user preferred full rate everywhere, and dropped frames didn't change.
     private var captureThrottle = false
+    /// Scan-out compensation strength (`set scanscale=0.4`; see Compositor.Config.scanScale).
+    private var scanScale: Float = 0.4
     private let hotkeys = Hotkeys()
     private var cancellables = Set<AnyCancellable>()
 
@@ -136,7 +138,10 @@ final class AppController: ObservableObject {
         Log.info("XRealDesk starting (preview: \(preview)) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
         hid.logger = { Log.info("[glasses] \($0)") }
         hid.onStateChange = { [weak self] state in self?.glassesStateChanged(state) }
-        hid.onDeviceInfo = { [weak self] info in self?.deviceInfo = info }
+        hid.onDeviceInfo = { [weak self] info in
+            self?.deviceInfo = info
+            if let serial = info?.serial { self?.restoreRotation(for: serial) }
+        }
         hid.onButton = { phys, virt, value in Log.info("Glasses button phys=\(phys) virt=\(virt) value=\(value)") }
         hid.onWornChange = { [weak self] worn in self?.wornChanged(worn) }
         hid.start()
@@ -283,6 +288,8 @@ final class AppController: ObservableObject {
             case "scan":    // rolling scan-out compensation: 0 off, 1 rows lit top to bottom, -1 bottom to top
                 if let x = Int(v), (-1...1).contains(x) { self.settings.scanOut = x }
                 self.hud(["Scan compensation: bottom → top", "Scan compensation off", "Scan compensation: top → bottom"][self.settings.scanOut + 1])
+            case "scanscale":   // scan-out compensation strength (0…2, default 0.4)
+                if let x = Float(v), x.isFinite { self.scanScale = min(max(x, 0), 2); self.pushConfig() }
             case "capturethrottle":   // 1 = capture screens out of view at a trickle, 0 = all at full rate (default)
                 self.captureThrottle = v == "1"
             case "calibrate":   // guided tracking calibration: 1 start, 0 cancel
@@ -848,7 +855,32 @@ final class AppController: ObservableObject {
          "focusDim": settings.focusDim, "roll": settings.rollDegrees, "stability": settings.stabilityDegrees, "prediction": settings.predictionMs, "flick": settings.flickSensitivity]
     }
 
+    // MARK: Rotation per headset
+
+    /// Tilt correction is a property of the headset (its sensor sits slightly rotated relative to its
+    /// displays), so it's remembered per serial number and comes back whenever those glasses connect.
+    private var rotationSerial: String?
+
+    private func restoreRotation(for serial: String) {
+        rotationSerial = serial
+        let key = "rollDegrees-\(serial)"
+        if let saved = UserDefaults.standard.object(forKey: key) as? Double, saved.isFinite {
+            if abs(saved - settings.rollDegrees) > 0.01 {
+                Log.info(String(format: "Rotation for headset %@: %.1f°", serial, saved))
+                settings.rollDegrees = min(max(saved, -15), 15)
+            }
+        } else {
+            UserDefaults.standard.set(settings.rollDegrees, forKey: key)
+        }
+    }
+
     private func settingsChanged() {
+        if let serial = rotationSerial {
+            let key = "rollDegrees-\(serial)"
+            if (UserDefaults.standard.object(forKey: key) as? Double) != settings.rollDegrees {
+                UserDefaults.standard.set(settings.rollDegrees, forKey: key)
+            }
+        }
         let newLayout = settings.layout()
         if newLayout != layout {
             layout = newLayout
@@ -1318,6 +1350,7 @@ final class AppController: ObservableObject {
         c.flat3D = !stereoDepth
         c.neckModel = settings.neckModel
         c.lateStart = lateStart
+        c.scanScale = scanScale
         c.presentDelay = presentDelay
         c.handoffOffset = handoffOffset
         c.followPresentation = followPresentation
