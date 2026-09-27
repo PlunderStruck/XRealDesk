@@ -641,6 +641,7 @@ func replay(csv: String, calibrationPath: String) {
         var st = ViewStabilizer(); st.leash = SpatialMath.radians(c.leash)
         var errs: [SIMD2<Float>] = []
         var working: [Bool] = []
+        var speeds: [Float] = []   // true head speed, °/s
         var trueVel: [SIMD2<Float>] = []   // yaw/pitch rate of the truth, °/s
         var R = 1.0
         while R + ahead < (t.last ?? 0) - 0.1 {
@@ -681,6 +682,7 @@ func replay(csv: String, calibrationPath: String) {
                 let (ry, rp) = SpatialMath.yawPitch(of: rendered), (ty, tp) = SpatialMath.yawPitch(of: truth)
                 errs.append(SIMD2(deg(ry - ty), deg(rp - tp)))
                 working.append(trueSpeed < SpatialMath.radians(10))
+                speeds.append(deg(trueSpeed))
                 let (py, pp) = SpatialMath.yawPitch(of: q[sampleIndex(at: R + ahead - frame)])
                 trueVel.append(SIMD2(deg(ty - py), deg(tp - pp)) / Float(frame))
                 R += frame
@@ -708,6 +710,7 @@ func replay(csv: String, calibrationPath: String) {
             let (ry, rp) = SpatialMath.yawPitch(of: rendered), (ty, tp) = SpatialMath.yawPitch(of: truth)
             errs.append(SIMD2(deg(ry - ty), deg(rp - tp)))
             working.append(trueSpeed < SpatialMath.radians(10))
+            speeds.append(deg(trueSpeed))
             let (py, pp) = SpatialMath.yawPitch(of: q[sampleIndex(at: R + ahead - frame)])
             trueVel.append(SIMD2(deg(ty - py), deg(tp - pp)) / Float(frame))
             R += frame
@@ -723,7 +726,7 @@ func replay(csv: String, calibrationPath: String) {
         let rms: ([Float]) -> Float = { a in sqrt(a.map { $0 * $0 }.reduce(0, +) / Float(max(a.count, 1))) }
         // Shake: the part of the error faster than ~5 Hz (error minus its centred 100 ms average),
         // and wobble: 1–5 Hz (100 ms average minus 1 s average). Working frames only.
-        var shake: [Float] = [], wob: [Float] = []
+        var shake: [Float] = [], wob: [Float] = [], mShake: [Float] = [], mJit: [Float] = [], mErr: [Float] = []
         if errs.count > 130 {
             var pre = [SIMD2<Float>](repeating: .zero, count: errs.count + 1)
             for k in errs.indices { pre[k + 1] = pre[k] + errs[k] }
@@ -731,6 +734,11 @@ func replay(csv: String, calibrationPath: String) {
             for k in 60..<(errs.count - 61) where working[k] {
                 let a6 = avg(k, 6), a60 = avg(k, 60)
                 shake.append(simd_length(errs[k] - a6)); wob.append(simd_length(a6 - a60))
+            }
+            // Medium movements (10–60°/s: glances, looking between screens).
+            for k in 60..<(errs.count - 61) where speeds[k] >= 10 && speeds[k] < 60 {
+                mShake.append(simd_length(errs[k] - avg(k, 6))); mErr.append(simd_length(errs[k]))
+                mJit.append(simd_length(errs[k] - errs[k - 1]))
             }
         }
         let p95 = swim.isEmpty ? 0 : swim.sorted()[min(swim.count - 1, Int(Float(swim.count) * 0.95))]
@@ -758,8 +766,8 @@ func replay(csv: String, calibrationPath: String) {
         let sp = shim.sorted()
         let p99 = sp.isEmpty ? 0 : sp[min(sp.count - 1, Int(Float(sp.count) * 0.99))]
         let p999 = sp.isEmpty ? 0 : sp[min(sp.count - 1, Int(Float(sp.count) * 0.999))]
-        print(String(format: "%-34@ | SHAKE %.4f° WOBBLE %.4f° | work err %.4f° | jitter rms %.4f° p99 %.4f° | turns err %.4f° | stop bounce avg %.3f° max %.3f° (%d stops)", c.name as NSString,
-                     rms(shake), rms(wob), rms(swim), rms(shim), p99, rms(turn), bounceAvg, bounceMax, bounces.count))
+        print(String(format: "%-34@ | SHAKE %.4f° WOBBLE %.4f° | MEDIUM err %.4f° shake %.4f° jit %.4f° | work err %.4f° | jitter rms %.4f° p99 %.4f° | turns err %.4f° | stop bounce avg %.3f° max %.3f° (%d stops)", c.name as NSString,
+                     rms(shake), rms(wob), rms(mErr), rms(mShake), rms(mJit), rms(swim), rms(shim), p99, rms(turn), bounceAvg, bounceMax, bounces.count))
         _ = p999
     }
     print("(1 px in the glasses ≈ 0.02°. Frames counted: head slower than 10°/s.)")
