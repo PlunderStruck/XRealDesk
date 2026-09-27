@@ -260,6 +260,54 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         if ctx.exited.wait(timeout: .now() + 1) == .timedOut { Log.error("Render thread didn't stop within 1 s") }
     }
 
+    // MARK: Cursor glide
+
+    /// When the cursor jumps to another screen (it follows your gaze), the glasses draw it gliding
+    /// there along the screens' surface instead of vanishing and reappearing. Moving the mouse across
+    /// a screen edge isn't a jump and is never delayed.
+    private var cursorLast: (panel: Int, uv: SIMD2<Float>)?
+    private var cursorGlide: (from: SIMD2<Float>, start: CFTimeInterval)?
+    static let cursorGlideSeconds = 0.13
+
+    /// Point on the layout surface (arc length, height) for a panel's UV.
+    private static func surfacePoint(_ p: ScreenLayout.Panel, _ uv: SIMD2<Float>) -> SIMD2<Float> {
+        SIMD2(p.arcCenter + (uv.x - 0.5) * p.size.x, p.height + (0.5 - uv.y) * p.size.y)
+    }
+
+    private func glideCursor(to panel: Int, uv: SIMD2<Float>, layout: ScreenLayout, now: CFTimeInterval) -> (Int, SIMD2<Float>) {
+        defer { cursorLast = (panel, uv) }
+        guard let target = layout.panels.first(where: { $0.index == panel }) else { return (panel, uv) }
+        let to = Compositor.surfacePoint(target, uv)
+        // Where the cursor is drawn right now (mid-glide, or its last spot).
+        func current() -> SIMD2<Float>? {
+            if let g = cursorGlide, let last = cursorLast, let lp = layout.panels.first(where: { $0.index == last.panel }) {
+                let t = Float(min(max((now - g.start) / Compositor.cursorGlideSeconds, 0), 1))
+                let e = 1 - (1 - t) * (1 - t) * (1 - t)
+                return g.from + (Compositor.surfacePoint(lp, last.uv) - g.from) * e
+            }
+            guard let last = cursorLast, let lp = layout.panels.first(where: { $0.index == last.panel }) else { return nil }
+            return Compositor.surfacePoint(lp, last.uv)
+        }
+        if let last = cursorLast, last.panel != panel, let from = current(),
+           simd_length(to - from) > 0.15 * target.size.x {
+            cursorGlide = (from, now)   // a jump between screens: glide from where it was drawn
+        }
+        guard let g = cursorGlide else { return (panel, uv) }
+        let t = Float((now - g.start) / Compositor.cursorGlideSeconds)
+        if t >= 1 || !t.isFinite { cursorGlide = nil; return (panel, uv) }
+        let e = 1 - (1 - t) * (1 - t) * (1 - t)   // ease out
+        let pos = g.from + (to - g.from) * e
+        // The panel under that point (or the nearest one, while crossing the gap between screens).
+        var best: (Int, SIMD2<Float>, Float)?
+        for p in layout.panels {
+            let u = (pos.x - p.arcCenter) / p.size.x + 0.5, v = 0.5 - (pos.y - p.height) / p.size.y
+            let out = max(max(-u, u - 1), max(-v, v - 1), 0)
+            if best == nil || out < best!.2 { best = (p.index, SIMD2(min(max(u, 0), 1), min(max(v, 0), 1)), out) }
+        }
+        guard let b = best else { return (panel, uv) }
+        return (b.0, b.1)
+    }
+
     // MARK: Render thread
 
     /// Real-time scheduling for the render thread (as audio and games use): the kernel runs it on
@@ -568,14 +616,17 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         var cursorPanel: Int?
         var cursorRect = SIMD4<Float>.zero
         if cursorState.visible, cursorState.image != nil, let loc = CGEvent(source: nil)?.location {
+            // Cached bounds: asking WindowServer every frame cost ~20 µs, and up to 5 ms while it's busy.
             for s in screensLock.withLock({ $0 }) {
-                let b = CGDisplayBounds(s.id)
+                let b = DisplayBoundsCache.bounds(s.id)
                 guard b.contains(loc), b.width > 0, b.height > 0 else { continue }
-                let x0 = (loc.x - cursorState.hotSpot.x - b.minX) / b.width
-                let y0 = (loc.y - cursorState.hotSpot.y - b.minY) / b.height
-                cursorRect = SIMD4(Float(x0), Float(y0), Float(x0 + cursorState.size.width / b.width),
-                                   Float(y0 + cursorState.size.height / b.height))
-                cursorPanel = s.index
+                let tip = SIMD2(Float((loc.x - b.minX) / b.width), Float((loc.y - b.minY) / b.height))
+                let (panel, uv) = glideCursor(to: s.index, uv: tip, layout: layout, now: now)
+                let hot = SIMD2(Float(cursorState.hotSpot.x / b.width), Float(cursorState.hotSpot.y / b.height))
+                let size = SIMD2(Float(cursorState.size.width / b.width), Float(cursorState.size.height / b.height))
+                let o = uv - hot
+                cursorRect = SIMD4(o.x, o.y, o.x + size.x, o.y + size.y)
+                cursorPanel = panel
                 break
             }
         }
