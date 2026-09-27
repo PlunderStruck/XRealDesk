@@ -92,6 +92,10 @@ final class AppController: ObservableObject {
     private var pendingFocus: (screen: Int, display: CGDirectDisplayID, since: CFTimeInterval)?
     /// Guided tracking calibration in progress (Calibration.swift).
     private var calibration: CalibrationSession?
+    /// Capture screens out of view at a trickle (`set capturethrottle=1`). Off: panning onto a
+    /// screen showed its content up to 0.1 s old, then snapped to current (a hop); in a blind A/B
+    /// the user preferred full rate everywhere, and dropped frames didn't change.
+    private var captureThrottle = false
     private let hotkeys = Hotkeys()
     private var cancellables = Set<AnyCancellable>()
 
@@ -279,6 +283,8 @@ final class AppController: ObservableObject {
             case "scan":    // rolling scan-out compensation: 0 off, 1 rows lit top to bottom, -1 bottom to top
                 if let x = Int(v), (-1...1).contains(x) { self.settings.scanOut = x }
                 self.hud(["Scan compensation: bottom → top", "Scan compensation off", "Scan compensation: top → bottom"][self.settings.scanOut + 1])
+            case "capturethrottle":   // 1 = capture screens out of view at a trickle, 0 = all at full rate (default)
+                self.captureThrottle = v == "1"
             case "calibrate":   // guided tracking calibration: 1 start, 0 cancel
                 // "screenN" starts it on glasses screen N (tests).
                 if v == "0" { self.calibration?.cancel() }
@@ -1158,7 +1164,7 @@ final class AppController: ObservableObject {
             if tickCount % 60 == 30, let px = VirtualDisplayManager.pixelSize(of: c.displayID) {
                 c.matchSize(CGSize(width: (px.width * captureScale).rounded(), height: (px.height * captureScale).rounded()))
             }
-            if !out.tracking || out.nearView.contains(c.index) { lastNearView[c.index] = now }
+            if !out.tracking || out.nearView.contains(c.index) || !captureThrottle { lastNearView[c.index] = now }
             c.setActive(now - (lastNearView[c.index] ?? now) < 1)
         }
         let rate = hid.sampleRate
