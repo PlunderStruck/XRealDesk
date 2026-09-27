@@ -43,6 +43,7 @@ public final class GlassesHIDService: @unchecked Sendable {
         /// Recent motion for the learned predictor (HeadPredictor); used when `learned` is on.
         public var features: HeadPredictor.Features?
         public var learned = false
+        public var learnedModel = HeadPredictor.Model.blended
         /// Learned prediction never exceeds the constant-speed one by more than this factor plus
         /// `learnedSlack` (a knock on the frame reads as a huge push; it mustn't fling the screens).
         public static let learnedMaxFactor: Float = 2
@@ -66,7 +67,7 @@ public final class GlassesHIDService: @unchecked Sendable {
             let dt = Float(min(max(time - hostTime, 0), maxAhead))
             let speed = simd_length(angularVelocity)
             if learned, let f = features {
-                var r = HeadPredictor.rotation(f, seconds: Double(dt))
+                var r = HeadPredictor.rotation(f, seconds: Double(dt), model: learnedModel)
                 var angle = simd_length(r)
                 if angle.isFinite, angle > 1e-7 {
                     let limit = Pose.learnedMaxFactor * speed * dt + Pose.learnedSlack
@@ -158,12 +159,12 @@ public final class GlassesHIDService: @unchecked Sendable {
         set { steadyLock.withLock { $0 = newValue } }
     }
     private let steadyLock = OSAllocatedUnfairLock(initialState: true)
-    /// Learned head-motion prediction (HeadPredictor) instead of the constant-speed guess.
-    public var learnedPrediction: Bool {
+    /// Head prediction: learned (HeadPredictor, `model`) or nil for the constant-speed guess.
+    public var predictionModel: HeadPredictor.Model? {
         get { learnedLock.withLock { $0 } }
         set { learnedLock.withLock { $0 = newValue } }
     }
-    private let learnedLock = OSAllocatedUnfairLock(initialState: true)
+    private let learnedLock = OSAllocatedUnfairLock<HeadPredictor.Model?>(initialState: .blended)
     private var headPredictor = HeadPredictor()
     private var steadyApplied = true
 
@@ -510,7 +511,9 @@ public final class GlassesHIDService: @unchecked Sendable {
                         hostTime: sampleTime, isStill: filter.isStill, warmedUp: filter.elapsed > 1.2, recentRotation: recent,
                         angularAcceleration: (accelFast - accelSlow) / Float(taus.slow - taus.fast))
         pose.smoothStops = steady
-        pose.learned = learnedLock.withLock { $0 }
+        let model = learnedLock.withLock { $0 }
+        pose.learned = model != nil
+        pose.learnedModel = model ?? .blended
         pose.features = headPredictor.features
         let latest = pose
         poseLock.withLock { $0 = latest }

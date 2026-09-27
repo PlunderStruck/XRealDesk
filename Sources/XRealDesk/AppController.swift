@@ -284,9 +284,8 @@ final class AppController: ObservableObject {
                 if v == "0" { self.calibration?.cancel() }
                 else if v == "autopilot" { self.startCalibration(); self.calibration?.autopilot = true }
                 else { self.startCalibration(screen: v.hasPrefix("screen") ? Int(v.dropFirst(6)).map { $0 - 1 } : nil) }
-            case "predictor":   // head prediction: 1 = learned (default), 0 = constant speed, for comparing
-                self.hid.learnedPrediction = v != "0"
-                self.hud(self.hid.learnedPrediction ? "Learned prediction" : "Constant-speed prediction")
+            case "predictor":   // head prediction: 1 = learned, blended (default), 2 = first learned fit, 0 = constant speed
+                self.hid.predictionModel = Int(v).flatMap(HeadPredictor.Model.init(rawValue:))
             case "steady":  // steady tracking: 1 = on (default), 0 = the previous tracking, for comparing
                 self.hid.steadyTracking = v != "0"
                 self.hud(self.hid.steadyTracking ? "Steady tracking on" : "Steady tracking off (old)")

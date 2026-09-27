@@ -80,11 +80,42 @@ public struct HeadPredictor: Sendable {
         return f
     }
 
+    public enum Model: Int, Sendable {
+        /// Two fits blended by head speed: a very smooth one while (nearly) still, a sharp one
+        /// while moving. Fitted with the wearer's own tracking calibration.
+        case blended = 1
+        /// The first single fit, kept for comparing.
+        case previous = 2
+    }
+
+    /// Head speed (°/s) over the last ~32 ms, from the features.
+    static func speed(_ f: Features) -> Float {
+        var w = SIMD3<Float>(repeating: 0)
+        let weights: [Float] = [2, 2, 4, 8, 16]   // 0-2, 2-4, 4-8, 8-16, 16-32 ms bins
+        for (k, x) in weights.enumerated() { w += SIMD3(f.values[3 * k], f.values[3 * k + 1], f.values[3 * k + 2]) * x }
+        return simd_length(w / 32) * 180 / .pi
+    }
+
     /// Head-frame rotation vector (radians) expected over the next `seconds`.
-    public static func rotation(_ f: Features, seconds: Double) -> SIMD3<Float> {
+    public static func rotation(_ f: Features, seconds: Double, model: Model = .blended) -> SIMD3<Float> {
+        switch model {
+        case .previous:
+            return rotation(f, seconds: seconds, weights: weightsPrevious)
+        case .blended:
+            let (lo, hi) = blendDegreesPerSecond
+            let x = min(max((speed(f) - lo) / max(hi - lo, 1e-3), 0), 1)
+            let t = x * x * (3 - 2 * x)
+            if t <= 0 { return rotation(f, seconds: seconds, weights: weightsStill) }
+            if t >= 1 { return rotation(f, seconds: seconds, weights: weightsMoving) }
+            return rotation(f, seconds: seconds, weights: weightsStill) * (1 - t)
+                 + rotation(f, seconds: seconds, weights: weightsMoving) * t
+        }
+    }
+
+    private static func rotation(_ f: Features, seconds: Double, weights: [[SIMD3<Float>]]) -> SIMD3<Float> {
         let ms = Float(seconds * 1000)
         let hs = horizonsMs
-        guard ms > 0, let first = hs.first, let last = hs.last else { return .zero }
+        guard ms > 0, let first = hs.first, let last = hs.last, weights.count == hs.count else { return .zero }
         func at(_ k: Int) -> SIMD3<Float> {
             var r = SIMD3<Float>(repeating: 0)
             let w = weights[k]

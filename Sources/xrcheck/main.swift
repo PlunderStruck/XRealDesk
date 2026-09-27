@@ -593,6 +593,7 @@ func replay(csv: String, calibrationPath: String) {
         var decel: Float = 0; var accel: Float = 0
         /// Learned prediction (HeadPredictor) in the app's Pose.
         var learned = false
+        var previousFit = false
     }
     // What the learned predictor sees at every sample.
     var feats: [HeadPredictor.Features?] = []
@@ -604,6 +605,7 @@ func replay(csv: String, calibrationPath: String) {
         .init(name: "APP CODE (Pose.predicted)", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, appPose: true),
         .init(name: "APP CODE, stability off", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0, appPose: true),
         .init(name: "LEARNED, stability off", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0, appPose: true, learned: true),
+        .init(name: "LEARNED previous (first fit)", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0, appPose: true, learned: true, previousFit: true),
         .init(name: "APP CODE, stability 0.01", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.01, appPose: true),
         .init(name: "SHIPPED: always, vel 8ms, cap 1.5x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.5),
         .init(name: "old: fade 2-10, vel 4ms, stab .08", fadeStart: 2, fadeFull: 10, velTau: 0.004, leash: 0.08),
@@ -675,7 +677,7 @@ func replay(csv: String, calibrationPath: String) {
                                                   warmedUp: true, recentRotation: GlassesHIDService.Pose.rotationAngle(d),
                                                   angularAcceleration: (appAccFast - appAccSlow) / Float(taus.slow - taus.fast))
                 var p2 = pose
-                if c.learned { p2.learned = true; p2.features = feats[i] }
+                if c.learned { p2.learned = true; p2.features = feats[i]; p2.learnedModel = c.previousFit ? .previous : .blended }
                 let rendered = st.update(head: p2.predicted(to: R + ahead, maxAhead: maxAhead), angularSpeed: speed, dt: Float(frame))
                 let truth = q[sampleIndex(at: R + ahead)]
                 let trueSpeed = simd_length(w[sampleIndex(at: R + ahead)])
