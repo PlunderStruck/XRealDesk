@@ -241,6 +241,35 @@ func unitChecks() {
         check(worst < 0.01, String(format: "rotation angle exact to %.2f%% from 0.0005° to 0.1°", worst * 100))
     }
 
+    print("learned head prediction")
+    do {
+        typealias Pose = GlassesHIDService.Pose
+        func pose(_ hp: HeadPredictor, rate: SIMD3<Float>) -> Pose {
+            var p = Pose(orientation: simd_quatf(ix: 0, iy: 0, iz: 0, r: 1), angularVelocity: rate, hostTime: 0,
+                         isStill: false, warmedUp: true)
+            p.learned = true; p.features = hp.features
+            return p
+        }
+        // A steady turn is predicted to carry on at the same speed.
+        var hp = HeadPredictor()
+        let turn = SIMD3<Float>(0, SpatialMath.radians(60), 0)
+        for _ in 0..<600 { hp.add(gyro: turn, accel: SIMD3(0, 1, 0)) }
+        let ahead = SpatialMath.degrees(Pose.rotationAngle(pose(hp, rate: turn).predicted(to: 0.04)))
+        check(abs(ahead - 2.4) < 0.25, String(format: "steady 60°/s turn: %.2f° ahead over 40 ms (2.40° expected)", ahead))
+        // Still head, then a knock on the frame (16 g for 2 ms): the screens mustn't be flung.
+        hp = HeadPredictor()
+        for _ in 0..<600 { hp.add(gyro: .zero, accel: SIMD3(0, 1, 0)) }
+        for _ in 0..<2 { hp.add(gyro: .zero, accel: SIMD3(16, 1, 0)) }
+        let knock = SpatialMath.degrees(Pose.rotationAngle(pose(hp, rate: .zero).predicted(to: 0.04)))
+        check(knock <= 0.1 + 1e-4, String(format: "knock on a still head: screens move %.3f° (≤ 0.1°)", knock))
+        // A corrupt sample restarts the history instead of poisoning it.
+        hp.add(gyro: SIMD3(.nan, 0, 0), accel: SIMD3(0, 1, 0))
+        check(hp.features == nil, "non-finite sample clears the history")
+        for _ in 0..<600 { hp.add(gyro: .zero, accel: SIMD3(0, 1, 0)) }
+        let still = SpatialMath.degrees(Pose.rotationAngle(pose(hp, rate: .zero).predicted(to: 0.04)))
+        check(still < 1e-3, String(format: "recovers: still head predicted still (%.4f°)", still))
+    }
+
     print("screens hold still through body motion")
     do {
         var rng = SplitMix(seed: 7)
@@ -562,10 +591,19 @@ func replay(csv: String, calibrationPath: String) {
         /// Deceleration-aware prediction: use this fraction of the measured slowdown (0 = off), and
         /// of the measured speed-up; the head is never predicted to stop and turn back.
         var decel: Float = 0; var accel: Float = 0
+        /// Learned prediction (HeadPredictor) in the app's Pose.
+        var learned = false
+    }
+    // What the learned predictor sees at every sample.
+    var feats: [HeadPredictor.Features?] = []
+    do {
+        var hp = HeadPredictor()
+        for i in t.indices { hp.add(gyro: w[i], accel: ac[i]); feats.append(hp.features) }
     }
     let configs: [Config] = [
         .init(name: "APP CODE (Pose.predicted)", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, appPose: true),
         .init(name: "APP CODE, stability off", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0, appPose: true),
+        .init(name: "LEARNED, stability off", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0, appPose: true, learned: true),
         .init(name: "APP CODE, stability 0.01", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.01, appPose: true),
         .init(name: "SHIPPED: always, vel 8ms, cap 1.5x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.5),
         .init(name: "old: fade 2-10, vel 4ms, stab .08", fadeStart: 2, fadeFull: 10, velTau: 0.004, leash: 0.08),
@@ -635,7 +673,9 @@ func replay(csv: String, calibrationPath: String) {
                 let pose = GlassesHIDService.Pose(orientation: q[i], angularVelocity: vel, hostTime: t[i], isStill: false,
                                                   warmedUp: true, recentRotation: GlassesHIDService.Pose.rotationAngle(d),
                                                   angularAcceleration: (appAccFast - appAccSlow) / Float(taus.slow - taus.fast))
-                let rendered = st.update(head: pose.predicted(to: R + ahead, maxAhead: maxAhead), angularSpeed: speed, dt: Float(frame))
+                var p2 = pose
+                if c.learned { p2.learned = true; p2.features = feats[i] }
+                let rendered = st.update(head: p2.predicted(to: R + ahead, maxAhead: maxAhead), angularSpeed: speed, dt: Float(frame))
                 let truth = q[sampleIndex(at: R + ahead)]
                 let trueSpeed = simd_length(w[sampleIndex(at: R + ahead)])
                 let (ry, rp) = SpatialMath.yawPitch(of: rendered), (ty, tp) = SpatialMath.yawPitch(of: truth)
@@ -736,6 +776,7 @@ if args.count > 3, args[1] == "wobble" {
     for csv in args[3...] { print("\n### \((csv as NSString).lastPathComponent)"); wobble(csv: csv, calibrationPath: args[2]) }
     exit(0)
 }
+if args.count > 4, args[1] == "dumpcal" { dumpCalibrated(csv: args[3], calibrationPath: args[2], out: args[4]); exit(0) }
 if args.count > 3, args[1] == "replay" {
     for csv in args[3...] { print("\n### \((csv as NSString).lastPathComponent)"); replay(csv: csv, calibrationPath: args[2]) }
     exit(0)

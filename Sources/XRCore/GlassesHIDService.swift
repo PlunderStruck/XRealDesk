@@ -40,6 +40,13 @@ public final class GlassesHIDService: @unchecked Sendable {
         public static let accelerationUse: Float = 0.3
         /// Off: the previous constant-speed prediction (for comparing).
         public var smoothStops = true
+        /// Recent motion for the learned predictor (HeadPredictor); used when `learned` is on.
+        public var features: HeadPredictor.Features?
+        public var learned = false
+        /// Learned prediction never exceeds the constant-speed one by more than this factor plus
+        /// `learnedSlack` (a knock on the frame reads as a huge push; it mustn't fling the screens).
+        public static let learnedMaxFactor: Float = 2
+        public static let learnedSlack: Float = 0.0017   // 0.1°
         public static let recentWindow: Double = 0.031
         /// Never predict more than this multiple of the rotation the head just made.
         public static let predictionCap: Float = 1.5
@@ -58,6 +65,16 @@ public final class GlassesHIDService: @unchecked Sendable {
         public func predicted(to time: TimeInterval, maxAhead: Double = Pose.maxAhead) -> simd_quatf {
             let dt = Float(min(max(time - hostTime, 0), maxAhead))
             let speed = simd_length(angularVelocity)
+            if learned, let f = features {
+                var r = HeadPredictor.rotation(f, seconds: Double(dt))
+                var angle = simd_length(r)
+                if angle.isFinite, angle > 1e-7 {
+                    let limit = Pose.learnedMaxFactor * speed * dt + Pose.learnedSlack
+                    if angle > limit { r *= limit / angle; angle = limit }
+                    return (orientation * simd_quatf(angle: angle, axis: r / angle)).normalized
+                }
+                if angle.isFinite { return orientation }
+            }
             // Tuned on recorded head motion (typing + turning): always predict, but never more
             // than 1.5× what the head actually did over the same span just before. Turns keep
             // their full prediction; a typing jolt that barely moved the head can't overshoot.
@@ -141,6 +158,13 @@ public final class GlassesHIDService: @unchecked Sendable {
         set { steadyLock.withLock { $0 = newValue } }
     }
     private let steadyLock = OSAllocatedUnfairLock(initialState: true)
+    /// Learned head-motion prediction (HeadPredictor) instead of the constant-speed guess.
+    public var learnedPrediction: Bool {
+        get { learnedLock.withLock { $0 } }
+        set { learnedLock.withLock { $0 = newValue } }
+    }
+    private let learnedLock = OSAllocatedUnfairLock(initialState: true)
+    private var headPredictor = HeadPredictor()
     private var steadyApplied = true
 
     public func recordIMU(to url: URL, seconds rawSeconds: Double) {
@@ -345,7 +369,7 @@ public final class GlassesHIDService: @unchecked Sendable {
         calLock.withLock { $0 = cal }
         log(String(format: "Calibration: %@ fov %.1f°×%.1f°", cal.isFactory ? "factory" : "defaults", cal.fovDegrees.x, cal.fovDegrees.y))
 
-        filter.reset()
+        filter.reset(); headPredictor.reset()
         if let b = biasStore?.loadBias(serial: serial) { filter.seedBias(b) }
         lastDeviceTimestamp = 0; clockOffset = nil
         streaming = false
@@ -457,6 +481,7 @@ public final class GlassesHIDService: @unchecked Sendable {
         let (g, a) = cal.correct(s)
         filter.update(gyro: g, accel: a, dt: dt)
         guard filter.initialized else { return }
+        headPredictor.add(gyro: filter.angularVelocity, accel: a)
 
         // Smoothed rate for prediction (~8 ms): removes per-sample gyro noise and single-jolt
         // spikes; tuned on recorded head motion.
@@ -480,6 +505,8 @@ public final class GlassesHIDService: @unchecked Sendable {
                         hostTime: sampleTime, isStill: filter.isStill, warmedUp: filter.elapsed > 1.2, recentRotation: recent,
                         angularAcceleration: (accelFast - accelSlow) / Float(taus.slow - taus.fast))
         pose.smoothStops = steady
+        pose.learned = learnedLock.withLock { $0 }
+        pose.features = headPredictor.features
         let latest = pose
         poseLock.withLock { $0 = latest }
 

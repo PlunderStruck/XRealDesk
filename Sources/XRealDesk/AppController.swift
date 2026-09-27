@@ -277,6 +277,9 @@ final class AppController: ObservableObject {
             case "scan":    // rolling scan-out compensation: 0 off, 1 rows lit top to bottom, -1 bottom to top
                 if let x = Int(v), (-1...1).contains(x) { self.settings.scanOut = x }
                 self.hud(["Scan compensation: bottom → top", "Scan compensation off", "Scan compensation: top → bottom"][self.settings.scanOut + 1])
+            case "predictor":   // head prediction: 1 = learned (default), 0 = constant speed, for comparing
+                self.hid.learnedPrediction = v != "0"
+                self.hud(self.hid.learnedPrediction ? "Learned prediction" : "Constant-speed prediction")
             case "steady":  // steady tracking: 1 = on (default), 0 = the previous tracking, for comparing
                 self.hid.steadyTracking = v != "0"
                 self.hud(self.hid.steadyTracking ? "Steady tracking on" : "Steady tracking off (old)")

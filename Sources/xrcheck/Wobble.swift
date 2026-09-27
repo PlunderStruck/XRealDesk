@@ -122,3 +122,21 @@ func accelBias(csv: String, calibrationPath: String) {
         print(String(format: "  yaw %4d°: %6d samples, (%.4f, %.4f, %.4f)", k, Int(c), m.x, m.y, m.z))
     }
 }
+
+/// Writes what the app's predictor sees at every sample (for fitting it offline): time, the filter's
+/// bias-corrected rate (head frame, rad/s), calibrated accelerometer (head frame, g) and the
+/// presented orientation (the screens' truth).
+func dumpCalibrated(csv: String, calibrationPath: String, out: String) {
+    guard let d = loadIMU(csv: csv, calibrationPath: calibrationPath) else { print("can't read inputs"); return }
+    var f = OrientationFilter()
+    var lines = ["t,wx,wy,wz,ax,ay,az,qx,qy,qz,qw"]
+    lines.reserveCapacity(d.t.count + 1)
+    for i in d.t.indices {
+        f.update(gyro: d.gyro[i], accel: d.accel[i], dt: i > 0 ? Float(d.t[i] - d.t[i - 1]) : 0.001)
+        guard f.initialized else { continue }
+        let w = f.angularVelocity, a = d.accel[i], q = f.presented.vector
+        lines.append(String(format: "%.6f,%g,%g,%g,%g,%g,%g,%.9g,%.9g,%.9g,%.9g", d.t[i], w.x, w.y, w.z, a.x, a.y, a.z, q.x, q.y, q.z, q.w))
+    }
+    try? lines.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8)
+    print("wrote \(lines.count - 1) samples to \(out)")
+}

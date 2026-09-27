@@ -1,0 +1,101 @@
+import Foundation
+import simd
+
+/// Predicts where the head will be a few tens of milliseconds ahead from its recent motion, with
+/// weights fitted to recorded head motion (typing, talking, turning: HeadPredictorWeights.swift).
+///
+/// The constant-speed guess only knows how fast the head turns right now. This also knows how that
+/// speed has been changing over the last ~0.1 s, and what the accelerometer felt: a head movement
+/// starts with a push (neck muscles, the jaw while talking) that the accelerometer feels before the
+/// rotation builds up. On recordings it wasn't fitted to: ~15% less error while working or talking,
+/// ~60% less while turning.
+///
+/// Fed every 1 kHz sample. Features: the mean rotation rate over windows 0–2, 2–4, 4–8 … 64–128 ms
+/// back (head frame, rad/s), then the accelerometer's mean over 0–2 … 32–64 ms back minus its
+/// 300 ms mean (head frame, g): 39 numbers.
+public struct HeadPredictor: Sendable {
+    public static let featureCount = 39
+    static let gyroEdges = [2, 4, 8, 16, 32, 64, 128]
+    static let accelEdges = [2, 4, 8, 16, 32, 64]
+    static let slowWindow = 300
+    static let ringSize = 512
+
+    public struct Features: Sendable {
+        public var values = SIMD64<Float>(repeating: 0)
+    }
+
+    private var gyroRing = [SIMD3<Float>](repeating: .zero, count: ringSize)
+    private var accelRing = [SIMD3<Float>](repeating: .zero, count: ringSize)
+    private var head = 0          // next write index
+    private var count = 0
+    /// Running sums of the last k samples for each window edge (Double: no drift).
+    private var gyroSums = [SIMD3<Double>](repeating: .zero, count: gyroEdges.count)
+    private var accelSums = [SIMD3<Double>](repeating: .zero, count: accelEdges.count)
+    private var accelSlowSum = SIMD3<Double>(repeating: 0)
+
+    public init() {}
+
+    public mutating func reset() { self = HeadPredictor() }
+
+    public mutating func add(gyro: SIMD3<Float>, accel: SIMD3<Float>) {
+        guard gyro.x.isFinite, gyro.y.isFinite, gyro.z.isFinite,
+              accel.x.isFinite, accel.y.isFinite, accel.z.isFinite else { reset(); return }
+        let n = HeadPredictor.ringSize
+        func old(_ ring: [SIMD3<Float>], _ k: Int) -> SIMD3<Double> {   // sample k back from the newest-to-be
+            SIMD3<Double>(ring[(head - k + n) % n])
+        }
+        for (j, k) in HeadPredictor.gyroEdges.enumerated() {
+            gyroSums[j] += SIMD3<Double>(gyro)
+            if count >= k { gyroSums[j] -= old(gyroRing, k) }
+        }
+        for (j, k) in HeadPredictor.accelEdges.enumerated() {
+            accelSums[j] += SIMD3<Double>(accel)
+            if count >= k { accelSums[j] -= old(accelRing, k) }
+        }
+        accelSlowSum += SIMD3<Double>(accel)
+        if count >= HeadPredictor.slowWindow { accelSlowSum -= old(accelRing, HeadPredictor.slowWindow) }
+        gyroRing[head] = gyro; accelRing[head] = accel
+        head = (head + 1) % n
+        count = min(count + 1, n)
+    }
+
+    /// nil until there's enough history.
+    public var features: Features? {
+        guard count > HeadPredictor.slowWindow else { return nil }
+        var f = Features()
+        var i = 0
+        var prev = SIMD3<Double>(repeating: 0), prevK = 0
+        for (j, k) in HeadPredictor.gyroEdges.enumerated() {
+            let m = (gyroSums[j] - prev) / Double(k - prevK)
+            f.values[i] = Float(m.x); f.values[i + 1] = Float(m.y); f.values[i + 2] = Float(m.z); i += 3
+            prev = gyroSums[j]; prevK = k
+        }
+        let slow = accelSlowSum / Double(HeadPredictor.slowWindow)
+        prev = .zero; prevK = 0
+        for (j, k) in HeadPredictor.accelEdges.enumerated() {
+            let m = (accelSums[j] - prev) / Double(k - prevK) - slow
+            f.values[i] = Float(m.x); f.values[i + 1] = Float(m.y); f.values[i + 2] = Float(m.z); i += 3
+            prev = accelSums[j]; prevK = k
+        }
+        return f
+    }
+
+    /// Head-frame rotation vector (radians) expected over the next `seconds`.
+    public static func rotation(_ f: Features, seconds: Double) -> SIMD3<Float> {
+        let ms = Float(seconds * 1000)
+        let hs = horizonsMs
+        guard ms > 0, let first = hs.first, let last = hs.last else { return .zero }
+        func at(_ k: Int) -> SIMD3<Float> {
+            var r = SIMD3<Float>(repeating: 0)
+            let w = weights[k]
+            for i in 0..<min(w.count, featureCount) { r += w[i] * f.values[i] }
+            return r
+        }
+        if ms <= first { return at(0) * (ms / first) }
+        if ms >= last { return at(hs.count - 1) * (ms / last) }
+        var k = 0
+        while k + 1 < hs.count && hs[k + 1] < ms { k += 1 }
+        let t = (ms - hs[k]) / (hs[k + 1] - hs[k])
+        return at(k) * (1 - t) + at(k + 1) * t
+    }
+}
