@@ -44,6 +44,13 @@ public final class GlassesHIDService: @unchecked Sendable {
         /// Never predict more than this multiple of the rotation the head just made.
         public static let predictionCap: Float = 1.5
 
+        /// Shortest rotation angle of `q`, precise down to tiny angles. (2·acos(real) in Float can't
+        /// resolve anything under ~0.04°: it snapped between 0 and 0.04° on head tremor, which made
+        /// the prediction cap flicker on and off every few frames: visible shake while still.)
+        public static func rotationAngle(_ q: simd_quatf) -> Float {
+            2 * atan2(simd_length(q.imag), abs(q.real))
+        }
+
         /// Extrapolates to `time` (same clock as hostTime) along the current rotation.
         /// Longest prediction. Must cover the whole display pipeline: ~39 ms at 120 Hz, ~68 ms at
         /// 60 Hz (side-by-side 3D), where a lower cap left the screens trailing every turn.
@@ -465,7 +472,7 @@ public final class GlassesHIDService: @unchecked Sendable {
             let h = history[(historyIndex - 1 - k + history.count * 2) % history.count]
             if h.t > 0 && sampleTime - h.t >= Pose.recentWindow {
                 let d = h.q.inverse * filter.presented
-                recent = 2 * acos(min(1, abs(d.real)))   // shortest rotation angle
+                recent = Pose.rotationAngle(d)
                 break
             }
         }

@@ -228,6 +228,19 @@ func unitChecks() {
         check(abs(yawDeg(f) - y0) < 0.5, String(format: "1°/s error recovered after steady period: drift %.2f° per minute", yawDeg(f) - y0))
     }
 
+    print("prediction cap sees tiny head motion")
+    do {
+        // Head tremor is a few hundredths of a degree; the cap must measure it smoothly (Float
+        // 2·acos(real) snapped between 0 and ~0.04°, flickering prediction on and off: shake).
+        var worst: Float = 0
+        for k in 1...200 {
+            let a = SpatialMath.radians(Float(k) * 0.0005)   // 0.0005° … 0.1°
+            let q = simd_quatf(angle: a, axis: simd_normalize(SIMD3<Float>(0.3, 1, 0.2)))
+            worst = max(worst, abs(GlassesHIDService.Pose.rotationAngle(q) - a) / a)
+        }
+        check(worst < 0.01, String(format: "rotation angle exact to %.2f%% from 0.0005° to 0.1°", worst * 100))
+    }
+
     print("screens hold still through body motion")
     do {
         var rng = SplitMix(seed: 7)
@@ -620,7 +633,7 @@ func replay(csv: String, calibrationPath: String) {
                 let d = pastQ.inverse * q[i]
                 let taus = GlassesHIDService.Pose.accelerationTaus
                 let pose = GlassesHIDService.Pose(orientation: q[i], angularVelocity: vel, hostTime: t[i], isStill: false,
-                                                  warmedUp: true, recentRotation: 2 * acos(min(1, abs(d.real))),
+                                                  warmedUp: true, recentRotation: GlassesHIDService.Pose.rotationAngle(d),
                                                   angularAcceleration: (appAccFast - appAccSlow) / Float(taus.slow - taus.fast))
                 let rendered = st.update(head: pose.predicted(to: R + ahead, maxAhead: maxAhead), angularSpeed: speed, dt: Float(frame))
                 let truth = q[sampleIndex(at: R + ahead)]
@@ -668,6 +681,18 @@ func replay(csv: String, calibrationPath: String) {
             }
         }
         let rms: ([Float]) -> Float = { a in sqrt(a.map { $0 * $0 }.reduce(0, +) / Float(max(a.count, 1))) }
+        // Shake: the part of the error faster than ~5 Hz (error minus its centred 100 ms average),
+        // and wobble: 1–5 Hz (100 ms average minus 1 s average). Working frames only.
+        var shake: [Float] = [], wob: [Float] = []
+        if errs.count > 130 {
+            var pre = [SIMD2<Float>](repeating: .zero, count: errs.count + 1)
+            for k in errs.indices { pre[k + 1] = pre[k] + errs[k] }
+            func avg(_ k: Int, _ h: Int) -> SIMD2<Float> { (pre[k + h + 1] - pre[k - h]) / Float(2 * h + 1) }
+            for k in 60..<(errs.count - 61) where working[k] {
+                let a6 = avg(k, 6), a60 = avg(k, 60)
+                shake.append(simd_length(errs[k] - a6)); wob.append(simd_length(a6 - a60))
+            }
+        }
         let p95 = swim.isEmpty ? 0 : swim.sorted()[min(swim.count - 1, Int(Float(swim.count) * 0.95))]
         let tp95 = turn.isEmpty ? 0 : turn.sorted()[min(turn.count - 1, Int(Float(turn.count) * 0.95))]
         // Stop bounce: after a turn (≥ 30°/s) ends (< 5°/s), how far the view overshoots in the
@@ -693,8 +718,8 @@ func replay(csv: String, calibrationPath: String) {
         let sp = shim.sorted()
         let p99 = sp.isEmpty ? 0 : sp[min(sp.count - 1, Int(Float(sp.count) * 0.99))]
         let p999 = sp.isEmpty ? 0 : sp[min(sp.count - 1, Int(Float(sp.count) * 0.999))]
-        print(String(format: "%-34@ | work err %.4f° | jitter rms %.4f° p99 %.4f° | turns err %.4f° | stop bounce avg %.3f° max %.3f° (%d stops)", c.name as NSString,
-                     rms(swim), rms(shim), p99, rms(turn), bounceAvg, bounceMax, bounces.count))
+        print(String(format: "%-34@ | SHAKE %.4f° WOBBLE %.4f° | work err %.4f° | jitter rms %.4f° p99 %.4f° | turns err %.4f° | stop bounce avg %.3f° max %.3f° (%d stops)", c.name as NSString,
+                     rms(shake), rms(wob), rms(swim), rms(shim), p99, rms(turn), bounceAvg, bounceMax, bounces.count))
         _ = p999
     }
     print("(1 px in the glasses ≈ 0.02°. Frames counted: head slower than 10°/s.)")
