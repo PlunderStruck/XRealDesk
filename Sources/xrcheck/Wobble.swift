@@ -213,3 +213,29 @@ func learnReplay(csvs: [String], calibrationPath: String) {
     let back = HeadPredictor.learned.netB3 == HeadPredictor.shipped.netB3
     print("  reset back to shipped:", back)
 }
+
+/// Learning survives a restart: learn, save, load into a fresh learner, and compare.
+func learnPersistCheck(csv: String, calibrationPath: String) {
+    guard let d = loadIMU(csv: csv, calibrationPath: calibrationPath) else { print("can't read inputs"); return }
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("xr-learn-\(getpid())")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    HeadPredictor.learned = HeadPredictor.shipped
+    func feed(_ l: OnlineLearner, _ range: Range<Int>) {
+        var f = OrientationFilter(), hp = HeadPredictor()
+        for i in range {
+            f.update(gyro: d.gyro[i], accel: d.accel[i], dt: i > range.lowerBound ? Float(d.t[i] - d.t[i - 1]) : 0.001)
+            guard f.initialized else { continue }
+            hp.add(gyro: f.angularVelocity, accel: d.accel[i])
+            l.add(t: d.t[i], features: hp.features, orientation: f.presented)
+        }
+    }
+    let a = OnlineLearner(); a.attach(serial: "test", directory: dir); a.enabled = true
+    feed(a, 0..<min(d.t.count, 320_000))
+    a.solveNowForTesting()
+    let before = a.status.minutesLearned
+    let b = OnlineLearner(); b.attach(serial: "test", directory: dir); b.enabled = true
+    feed(b, 0..<2000)   // first samples pick up the saved sums
+    b.solveNowForTesting()
+    print(String(format: "  learned %.1f min, saved; after a restart the new learner starts at %.1f min", before, b.status.minutesLearned))
+    try? FileManager.default.removeItem(at: dir)
+}

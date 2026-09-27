@@ -83,6 +83,9 @@ public final class OnlineLearner: @unchecked Sendable {
     private let nHidden: Int
     private let nOut: Int
     private var storeURL: URL?
+    private var dataURL: URL?
+    /// Sums loaded from disk, handed to the sensor thread at its next sample.
+    private let pendingLoad = OSAllocatedUnfairLock<[Double]?>(initialState: nil)
 
     public init() {
         let nf = OnlineLearner.nf
@@ -102,6 +105,11 @@ public final class OnlineLearner: @unchecked Sendable {
         solveQueue.sync {
             let url = directory.appendingPathComponent("learned-\(serial).plist")
             storeURL = url
+            dataURL = directory.appendingPathComponent("learned-\(serial).sums")
+            if let du = dataURL, let data = try? Data(contentsOf: du), data.count % 8 == 0 {
+                let values = data.withUnsafeBytes { Array($0.bindMemory(to: Double.self)) }
+                if values.count == sumsCount, values.allSatisfy(\.isFinite) { pendingLoad.withLock { $0 = values } }
+            }
             guard let d = NSDictionary(contentsOf: url) as? [String: Any],
                   (d["version"] as? Int) == 1,
                   let still = d["still"] as? [Double], let w3 = d["netW3"] as? [Double], let b3 = d["netB3"] as? [Double],
@@ -127,6 +135,8 @@ public final class OnlineLearner: @unchecked Sendable {
         solveQueue.async { [self] in
             HeadPredictor.learned = HeadPredictor.shipped
             if let url = storeURL { try? FileManager.default.removeItem(at: url) }
+            if let url = dataURL { try? FileManager.default.removeItem(at: url) }
+            pendingLoad.withLock { $0 = nil }
             lock.withLock { $0.status = Status() }
             log?("Learned tracking reset to the shipped fit")
         }
@@ -148,6 +158,7 @@ public final class OnlineLearner: @unchecked Sendable {
     /// - Parameters: sample time (s), the predictor's features, the head orientation (presented).
     public func add(t: Double, features: HeadPredictor.Features?, orientation q: simd_quatf) {
         if pendingReset { clearSums(); pendingReset = false }
+        if let values = pendingLoad.withLock({ v -> [Double]? in defer { v = nil }; return v }) { unpackSums(values) }
         guard enabled, let f = features, t.isFinite else { lastT = nil; return }
         if let last = lastT, t - last > 0.1 { ring.removeAll(); ringStart = 0 }   // a gap: start over
         lastT = t
@@ -161,7 +172,7 @@ public final class OnlineLearner: @unchecked Sendable {
         for (k, x) in bw.enumerated() { w += SIMD3(f.values[3 * k], f.values[3 * k + 1], f.values[3 * k + 2]) * x }
         let speed = simd_length(w / 32) * 180 / .pi
         ring.append(Sample(t: t, f: f, q: q, hidden: hidden, targets: Array(repeating: nil, count: OnlineLearner.horizons.count), speed: speed))
-        if trainingBlock { addFeatureSums(f) }
+        if trainingBlock { addFeatureSums(f, weight: OnlineLearner.stillRole(speed)) }
 
         // Samples whose future has now arrived get their targets.
         let maxH = OnlineLearner.horizons.last ?? 80
@@ -180,7 +191,7 @@ public final class OnlineLearner: @unchecked Sendable {
         let done = now - maxH
         if done >= ringStart {
             let s = ring[done]
-            if trainingBlock, let hidden = s.hidden { addHiddenSums(hidden, s.targets) }
+            if trainingBlock, let hidden = s.hidden { addHiddenSums(hidden, s.targets, weight: OnlineLearner.netRole(s.speed)) }
             if !trainingBlock { addTest(s) }
         }
         // Keep ~130 ms.
@@ -197,6 +208,30 @@ public final class OnlineLearner: @unchecked Sendable {
         }
     }
 
+    private var sumsCount: Int { xx.count * 2 + xy.count * xy[0].count * 2 + hh.count + hy.count + 3 }
+
+    private func packSums() -> [Double] {
+        var v: [Double] = []
+        v.reserveCapacity(sumsCount)
+        v += xx; v += dxx
+        for h in xy { v += h }
+        for h in dxy { v += h }
+        v += hh; v += hy
+        v += [n, nh, trainingTime]
+        return v
+    }
+
+    private func unpackSums(_ v: [Double]) {
+        guard v.count == sumsCount else { return }
+        var i = 0
+        func take(_ c: Int) -> [Double] { defer { i += c }; return Array(v[i..<(i + c)]) }
+        xx = take(xx.count); dxx = take(dxx.count)
+        for h in xy.indices { xy[h] = take(xy[h].count) }
+        for h in dxy.indices { dxy[h] = take(dxy[h].count) }
+        hh = take(hh.count); hy = take(hy.count)
+        n = v[i]; nh = v[i + 1]; trainingTime = v[i + 2]
+    }
+
     private func clearSums() {
         for i in xx.indices { xx[i] = 0; dxx[i] = 0 }
         for h in xy.indices { for i in xy[h].indices { xy[h][i] = 0; dxy[h][i] = 0 } }
@@ -206,18 +241,27 @@ public final class OnlineLearner: @unchecked Sendable {
         testX.removeAll(); testH.removeAll(); testY.removeAll(); testS.removeAll(); testT.removeAll()
     }
 
-    private func addFeatureSums(_ f: HeadPredictor.Features) {
+    /// How much a sample counts for each part: the still-head fit is used below ~2–8°/s and the
+    /// net above, so each learns from the moments it's actually used for (a little of both always).
+    static func netRole(_ speed: Float) -> Double {
+        let (lo, hi) = HeadPredictor.hybridDegreesPerSecond
+        let x = Double(min(max((speed - lo) / max(hi - lo, 1e-3), 0), 1))
+        return 0.05 + 0.95 * x * x * (3 - 2 * x)
+    }
+    static func stillRole(_ speed: Float) -> Double { 1.05 - netRole(speed) }
+
+    private func addFeatureSums(_ f: HeadPredictor.Features, weight w: Double) {
         let nf = OnlineLearner.nf
         for i in 0..<nf {
-            let a = Double(f.values[i]); if a == 0 { continue }
+            let a = Double(f.values[i]) * w; if a == 0 { continue }
             for j in i..<nf { xx[i * nf + j] += a * Double(f.values[j]) }
         }
-        n += 1
+        n += w
         let j8 = ring.count - 1 - 8
         if j8 >= ringStart {
             let g = ring[j8].f
             for i in 0..<nf {
-                let a = Double(f.values[i] - g.values[i]); if a == 0 { continue }
+                let a = Double(f.values[i] - g.values[i]) * w; if a == 0 { continue }
                 for j in i..<nf { dxx[i * nf + j] += a * Double(f.values[j] - g.values[j]) }
             }
         }
@@ -226,28 +270,29 @@ public final class OnlineLearner: @unchecked Sendable {
     private func addTargetSums(sample j: Int, horizonIndex hi: Int, y: SIMD3<Float>) {
         let nf = OnlineLearner.nf
         let f = ring[j].f
+        let w = OnlineLearner.stillRole(ring[j].speed)
         for i in 0..<nf {
-            let a = Double(f.values[i]); if a == 0 { continue }
+            let a = Double(f.values[i]) * w; if a == 0 { continue }
             xy[hi][i * 3] += a * Double(y.x); xy[hi][i * 3 + 1] += a * Double(y.y); xy[hi][i * 3 + 2] += a * Double(y.z)
         }
         let j8 = j - 8
         if j8 >= ringStart, let y8 = ring[j8].targets[hi] {
             let g = ring[j8].f, dy = y - y8
             for i in 0..<nf {
-                let a = Double(f.values[i] - g.values[i]); if a == 0 { continue }
+                let a = Double(f.values[i] - g.values[i]) * w; if a == 0 { continue }
                 dxy[hi][i * 3] += a * Double(dy.x); dxy[hi][i * 3 + 1] += a * Double(dy.y); dxy[hi][i * 3 + 2] += a * Double(dy.z)
             }
         }
     }
 
-    private func addHiddenSums(_ h: [Float], _ targets: [SIMD3<Float>?]) {
+    private func addHiddenSums(_ h: [Float], _ targets: [SIMD3<Float>?], weight w: Double) {
         guard h.count == nHidden, targets.allSatisfy({ $0 != nil }), nOut == 3 * targets.count else { return }
         let m = nHidden + 1
         var v = h.map(Double.init); v.append(1)
-        for i in 0..<m { let a = v[i]; for j in i..<m { hh[i * m + j] += a * v[j] } }
+        for i in 0..<m { let a = v[i] * w; for j in i..<m { hh[i * m + j] += a * v[j] } }
         let deg = 180.0 / Double.pi
         for i in 0..<m {
-            let a = v[i]
+            let a = v[i] * w
             for (k, y) in targets.enumerated() {
                 let y = y!
                 hy[i * nOut + 3 * k] += a * Double(y.x) * deg
@@ -255,7 +300,7 @@ public final class OnlineLearner: @unchecked Sendable {
                 hy[i * nOut + 3 * k + 2] += a * Double(y.z) * deg
             }
         }
-        nh += 1
+        nh += w
     }
 
     private func addTest(_ s: Sample) {
@@ -283,6 +328,9 @@ public final class OnlineLearner: @unchecked Sendable {
     // MARK: Solve and gate (background)
 
     private func solveAndMaybeAdopt() {
+        // Keep what's been learned across restarts (~100 KB, once a minute at most).
+        let values = packSums(), dataURL = self.dataURL
+        solveQueue.async { if let url = dataURL { try? values.withUnsafeBytes { try Data($0).write(to: url, options: .atomic) } } }
         let snapshot = (xx: xx, xy: xy, dxx: dxx, dxy: dxy, hh: hh, hy: hy, n: n, nh: nh, minutes: trainingTime / 60,
                         testX: testX, testH: testH, testY: testY, testS: testS, testT: testT)
         solveQueue.async { [self] in
