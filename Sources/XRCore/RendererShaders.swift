@@ -473,6 +473,14 @@ public enum RendererShaders {
                 float2 cuv = (uv - p.cursorRect.xy) / rs;
                 if (all(cuv >= 0.0) && all(cuv <= 1.0)) {
                     float4 cc = cursor.sample(smp, cuv, gradient2d(duvx / rs, duvy / rs));   // premultiplied
+                    // Softened with the screens while the picture moves: a small, razor-sharp, high-
+                    // contrast cursor is where the eye catches every frame step, so it read as stutter.
+                    if (u.motion > 0.001) {
+                        float2 ca = 0.25 * (duvx + duvy) / rs, cb = 0.25 * (duvx - duvy) / rs;
+                        float4 box = 0.25 * (cursor.sample(smp, cuv + ca, level(0)) + cursor.sample(smp, cuv - ca, level(0))
+                                           + cursor.sample(smp, cuv + cb, level(0)) + cursor.sample(smp, cuv - cb, level(0)));
+                        cc = mix(cc, box, u.motion);
+                    }
                     color = cc.rgb + color * (1.0 - cc.a);
                 }
             }
