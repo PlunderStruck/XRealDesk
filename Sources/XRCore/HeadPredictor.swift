@@ -1,5 +1,6 @@
 import Foundation
 import simd
+import os
 
 /// Predicts where the head will be a few tens of milliseconds ahead from its recent motion, with
 /// weights fitted to recorded head motion (typing, talking, turning: HeadPredictorWeights.swift).
@@ -91,6 +92,31 @@ public struct HeadPredictor: Sendable {
         case hybrid = 3
     }
 
+    /// The parts of the predictor that keep learning from the wearer (OnlineLearner): the still-head
+    /// linear fit and the neural net's output layer. Starts as the shipped fit; swapped atomically.
+    public struct Learned: Sendable {
+        public var still: [[SIMD3<Float>]]
+        public var netW3: [Float]
+        public var netB3: [Float]
+        public init(still: [[SIMD3<Float>]], netW3: [Float], netB3: [Float]) {
+            self.still = still; self.netW3 = netW3; self.netB3 = netB3
+        }
+        public var isUsable: Bool {
+            still.count == horizonsMs.count && still.allSatisfy { $0.count == featureCount }
+                && netW3.count == netW3Size && netB3.count == netSizes.last
+                && still.allSatisfy { $0.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite } }
+                && netW3.allSatisfy(\.isFinite) && netB3.allSatisfy(\.isFinite)
+        }
+    }
+    static var netW3Size: Int { netSizes.count == 4 ? netSizes[2] * netSizes[3] : 0 }
+    public static let shipped = Learned(still: weightsStill, netW3: netW3, netB3: netB3)
+    private static let learnedLock = OSAllocatedUnfairLock(initialState: shipped)
+    /// What the hybrid model predicts with right now (thread-safe). Unusable values are refused.
+    public static var learned: Learned {
+        get { learnedLock.withLock { $0 } }
+        set { if newValue.isUsable { learnedLock.withLock { $0 = newValue } } }
+    }
+
     /// Head speed (°/s) over which the neural net takes over from the still-head fit (hybrid).
     /// Held-out sessions: 2–8°/s beat 5–20°/s (slow movement 0.73 vs 0.77 px jitter).
     static let hybridDegreesPerSecond: (start: Float, full: Float) = (2, 8)
@@ -109,11 +135,12 @@ public struct HeadPredictor: Sendable {
         case .previous:
             return rotation(f, seconds: seconds, weights: weightsPrevious)
         case .hybrid:
+            let p = learned
             let (lo, hi) = hybridDegreesPerSecond
             let x = min(max((speed(f) - lo) / max(hi - lo, 1e-3), 0), 1)
             let t = x * x * (3 - 2 * x)
-            let still = rotation(f, seconds: seconds, weights: weightsStill)
-            guard t > 0, let net = netRotation(f, seconds: seconds) else { return still }
+            let still = rotation(f, seconds: seconds, weights: p.still)
+            guard t > 0, let h = netHidden(f), let net = netRotation(hidden: h, seconds: seconds, w3: p.netW3, b3: p.netB3) else { return still }
             return still * (1 - t) + net * t
         case .blended:
             let (lo, hi) = blendDegreesPerSecond
@@ -126,15 +153,11 @@ public struct HeadPredictor: Sendable {
         }
     }
 
-    /// The neural net's rotation (radians, head frame) over `seconds`, or nil if it isn't usable.
-    static func netRotation(_ f: Features, seconds: Double) -> SIMD3<Float>? {
+    /// The neural net's last hidden layer for these features (what its output layer reads).
+    public static func netHidden(_ f: Features) -> [Float]? {
         let sizes = netSizes
-        let hs = horizonsMs
-        guard sizes.count == 4, sizes[0] == featureCount, sizes[3] == 3 * hs.count,
-              netW1.count == sizes[0] * sizes[1], netW2.count == sizes[1] * sizes[2], netW3.count == sizes[2] * sizes[3],
-              let first = hs.first, let last = hs.last else { return nil }
-        let ms = Float(seconds * 1000)
-        guard ms > 0 else { return .zero }
+        guard sizes.count == 4, sizes[0] == featureCount,
+              netW1.count == sizes[0] * sizes[1], netW2.count == sizes[1] * sizes[2] else { return nil }
         var x = [Float](repeating: 0, count: sizes[0])
         for i in 0..<sizes[0] { x[i] = (f.values[i] - netMean[i]) / max(netScale[i], 1e-12) }
         func layer(_ input: [Float], _ w: [Float], _ b: [Float], _ n: Int, tanh apply: Bool) -> [Float] {
@@ -149,8 +172,28 @@ public struct HeadPredictor: Sendable {
             return out
         }
         let h1 = layer(x, netW1, netB1, sizes[1], tanh: true)
-        let h2 = layer(h1, netW2, netB2, sizes[2], tanh: true)
-        let o = layer(h2, netW3, netB3, sizes[3], tanh: false)
+        return layer(h1, netW2, netB2, sizes[2], tanh: true)
+    }
+
+    /// All net outputs (degrees; 3 per horizon) from the last hidden layer and an output layer.
+    public static func netOutputs(hidden h: [Float], w3: [Float], b3: [Float]) -> [Float] {
+        let n = b3.count
+        var out = b3
+        guard w3.count == h.count * n else { return out }
+        for i in 0..<h.count {
+            let v = h[i], row = i * n
+            for j in 0..<n { out[j] += v * w3[row + j] }
+        }
+        return out
+    }
+
+    /// The neural net's rotation (radians, head frame) over `seconds`, or nil if it isn't usable.
+    static func netRotation(hidden: [Float], seconds: Double, w3: [Float], b3: [Float]) -> SIMD3<Float>? {
+        let hs = horizonsMs
+        guard b3.count == 3 * hs.count, w3.count == hidden.count * b3.count, let first = hs.first, let last = hs.last else { return nil }
+        let ms = Float(seconds * 1000)
+        guard ms > 0 else { return .zero }
+        let o = netOutputs(hidden: hidden, w3: w3, b3: b3)
         func at(_ k: Int) -> SIMD3<Float> { SIMD3(o[3 * k], o[3 * k + 1], o[3 * k + 2]) * (.pi / 180) }
         let r: SIMD3<Float>
         if ms <= first { r = at(0) * (ms / first) }
@@ -162,6 +205,11 @@ public struct HeadPredictor: Sendable {
             r = at(k) * (1 - t) + at(k + 1) * t
         }
         return r.x.isFinite && r.y.isFinite && r.z.isFinite ? r : nil
+    }
+
+    /// The linear fit's rotation over `seconds` with the given per-horizon weights.
+    static func rotation(_ f: Features, seconds: Double, stillWeights: [[SIMD3<Float>]]) -> SIMD3<Float> {
+        rotation(f, seconds: seconds, weights: stillWeights)
     }
 
     private static func rotation(_ f: Features, seconds: Double, weights: [[SIMD3<Float>]]) -> SIMD3<Float> {

@@ -173,3 +173,43 @@ func lensInfo(calibrationPath: String) {
         print(line)
     }
 }
+
+/// Feeds recordings (back to back, as one long session) through the app's OnlineLearner as if worn
+/// live, and reports what it adopts.
+func learnReplay(csvs: [String], calibrationPath: String) {
+    HeadPredictor.learned = HeadPredictor.shipped
+    if ProcessInfo.processInfo.environment["DEGRADE"] != nil {
+        // Test the adoption path: start from a worse fit (predictions halved).
+        var w = HeadPredictor.shipped
+        w.still = w.still.map { $0.map { $0 * 0.5 } }; w.netW3 = w.netW3.map { $0 * 0.5 }; w.netB3 = w.netB3.map { $0 * 0.5 }
+        HeadPredictor.learned = w
+        print("  starting from a degraded fit")
+    }
+    let learner = OnlineLearner()
+    learner.log = { print("  learner:", $0) }
+    learner.enabled = true
+    let t0 = CFAbsoluteTimeGetCurrent()
+    var offset = 0.0
+    var d = (t: [Double](), gyro: [SIMD3<Float>](), accel: [SIMD3<Float>]())
+    for csv in csvs {
+        guard let part = loadIMU(csv: csv, calibrationPath: calibrationPath) else { print("can't read \(csv)"); return }
+        var f = OrientationFilter(), hp = HeadPredictor()
+        for i in part.t.indices {
+            f.update(gyro: part.gyro[i], accel: part.accel[i], dt: i > 0 ? Float(part.t[i] - part.t[i - 1]) : 0.001)
+            guard f.initialized else { continue }
+            hp.add(gyro: f.angularVelocity, accel: part.accel[i])
+            learner.add(t: offset + part.t[i], features: hp.features, orientation: f.presented)
+        }
+        offset += (part.t.last ?? 0) + 1
+        d.t.append(offset)
+    }
+    learner.solveNowForTesting()
+    let st = learner.status
+    print(String(format: "  %.1f s of samples in %.1f s of CPU; %.1f min learned, %d improvements adopted", offset,
+                 CFAbsoluteTimeGetCurrent() - t0, st.minutesLearned, st.adoptions))
+    if let s = st.lastScore { print(String(format: "  last check: moving jitter current %.4f° vs candidate %.4f°", s.current, s.candidate)) }
+    print("  learned fit usable:", HeadPredictor.learned.isUsable)
+    learner.reset(); learner.solveNowForTesting()
+    let back = HeadPredictor.learned.netB3 == HeadPredictor.shipped.netB3
+    print("  reset back to shipped:", back)
+}

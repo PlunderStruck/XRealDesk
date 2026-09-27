@@ -185,6 +185,8 @@ final class Settings: ObservableObject {
     @Published var cursorFollowsGaze: Bool { didSet { d.set(cursorFollowsGaze, forKey: "cursorFollowsGaze") } }
     /// When the cursor jumps to the screen you look at, focus the window you last used there.
     @Published var keyboardFollowsGaze: Bool { didSet { d.set(keyboardFollowsGaze, forKey: "keyboardFollowsGaze") } }
+    /// Keep improving head tracking from your own head motion (off: keep what it has learned as is).
+    @Published var keepImprovingTracking: Bool { didSet { d.set(keepImprovingTracking, forKey: "keepImprovingTracking") } }
     /// Put windows back on their glasses screens after restarts, unplugging, sleep.
     @Published var windowMemory: Bool { didSet { d.set(windowMemory, forKey: "windowMemory") } }
     @Published var predictionMs: Double { didSet { d.set(predictionMs, forKey: "predictionMs") } }
@@ -261,7 +263,7 @@ final class Settings: ObservableObject {
             "screenCount": 3, "rows": 1, "resolution": ResolutionPreset.default.id, "hiDPI": true,
             "refreshRate": 120, "glassesIsMain": false,
             "screenWidthDegrees": 33.0, "gapDegrees": 1.5, "curve": 0.55, "tiltDegrees": 0.0,
-            "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
+            "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true, "keepImprovingTracking": true,
             "predictionMs": 14.0, "neckModel": true, "scanOut": 1, "stabilityDegrees": 0.0, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
             "sharpen": 0.35, "subpixel": 2, "subpixelStrength": 1.0, "warmth": 0.0, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
             "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "glassesOffMoveDelay": 10.0, "diagnosticLog": false, "showInDock": true,
@@ -286,6 +288,7 @@ final class Settings: ObservableObject {
         cursorFollowsGaze = d.bool(forKey: "cursorFollowsGaze")
         keyboardFollowsGaze = d.bool(forKey: "keyboardFollowsGaze")
         windowMemory = d.bool(forKey: "windowMemory")
+        keepImprovingTracking = d.bool(forKey: "keepImprovingTracking")
         predictionMs = Self.number(d, "predictionMs", 0, 40)
         // The old 0.03° default made screens trail small head movements by ~40 ms (measured on real
         // recordings: world-lock error halves without it). Move anyone still on it to off, once.
