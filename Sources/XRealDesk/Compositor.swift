@@ -76,6 +76,11 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         var sideBySide = false
         /// Screens within reach of the view (field of view plus a margin): captured at full rate.
         var nearView: Set<Int> = []
+        /// Where straight ahead meets a screen (index, UV with v top → bottom), for calibration.
+        var gazeIndex: Int?
+        var gazeUV = SIMD2<Float>(0.5, 0.5)
+        /// Where straight ahead appears in the glasses picture (0…1, y top → bottom).
+        var aim = SIMD2<Float>(0.5, 0.5)
     }
 
     private let renderer: Renderer
@@ -468,10 +473,12 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         // View rotation: layout frame -> eye.
         var viewRot: simd_quatf
         var gaze: Int?
+        var gazeHit: (index: Int, uv: SIMD2<Float>)?
         switch cfg.mode {
         case .anchored, .smart, .smoothFollow:
             viewRot = (tracking || !needsRecenter) ? head.inverse * anchor : simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
-            gaze = layout.hit(direction: viewRot.inverse.act(SIMD3(0, 0, -1)), margin: 0.03)?.index
+            gazeHit = layout.hit(direction: viewRot.inverse.act(SIMD3(0, 0, -1)), margin: 0.03)
+            gaze = gazeHit?.index
         case .headLocked:
             let p = layout.panels.first { $0.index == focus }
             let targetView = p.map { (layout.tiltRotation * SpatialMath.orientation(yaw: $0.yaw, pitch: 0)).inverse }
@@ -702,6 +709,9 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         }
         var out = outputLock.withLock { $0 }
         out.gaze = gaze
+        out.gazeIndex = gazeHit?.index
+        if let g = gazeHit { out.gazeUV = g.uv }
+        if cal.resolution.x > 0, cal.resolution.y > 0 { out.aim = center / cal.resolution }
         out.viewYawPitch = SIMD2(vy, vp)
         // Which screens you could see within the next ~100 ms (FOV + 20° of head turn).
         let fovHalf = SIMD2<Float>(SpatialMath.radians(cal.fovDegrees.x / 2), SpatialMath.radians(cal.fovDegrees.y / 2))

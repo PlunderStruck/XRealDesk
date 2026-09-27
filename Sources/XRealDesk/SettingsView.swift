@@ -241,6 +241,9 @@ struct SettingsView: View {
                 Toggle("Neck model", isOn: $settings.neckModel)
                 Text("When you turn or nod, your eyes swing around your neck. With this on, the screens shift the way real objects would, which makes them feel more solidly in place. Turn it off if the screens seem to drift as you turn.")
                     .font(.caption).foregroundStyle(.secondary)
+                Button("Calibrate tracking…") { app.startCalibration() }
+                Text("About 4 minutes of short guided tasks in the glasses (hold still, talk, type, follow a dot) plus a quick timing check. It records how your head moves so tracking can be tuned to you. Esc stops it at any time.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section {
                 DisclosureGroup("Advanced tuning") {

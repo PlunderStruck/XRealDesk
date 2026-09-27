@@ -180,6 +180,11 @@ public final class GlassesHIDService: @unchecked Sendable {
         }
     }
 
+    /// Ends a recording started with `recordIMU` now (it's written out with the next sample).
+    public func stopIMURecording() {
+        perform { [weak self] in self?.recordUntil = 0 }
+    }
+
     public func reconnect() {
         perform { [weak self] in
             guard let self else { return }

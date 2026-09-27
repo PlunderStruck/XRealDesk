@@ -66,6 +66,9 @@ struct ControlPanel: View {
             }
             .buttonStyle(IconButtonStyle())
             .help(settings.cursorFollowsGaze ? "Cursor follows your gaze: on (⌃⌥G)" : "Cursor follows your gaze: off (⌃⌥G)")
+            Button { app.startCalibration() } label: { Image(systemName: "dot.scope") }
+                .buttonStyle(IconButtonStyle())
+                .help("Calibrate tracking: a few short guided tasks that tune head tracking to you")
             Spacer()
             Button { openSetup(nil) } label: { Image(systemName: "wand.and.stars") }
                 .buttonStyle(IconButtonStyle()).help("Setup assistant")

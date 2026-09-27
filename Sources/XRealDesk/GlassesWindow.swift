@@ -85,6 +85,49 @@ final class MetalHostView: NSView {
         if seconds > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work) }
     }
 
+    // MARK: Calibration aim ring (head-locked: drawn on top of the picture, moves with the head)
+
+    private let aimRing = CAShapeLayer(), aimFill = CAShapeLayer(), aimDot = CAShapeLayer()
+    private var aimConfigured = false
+
+    /// `p`: where straight ahead appears (0…1, y top → bottom); `progress` 0…1 fills the ring.
+    func showAim(at p: SIMD2<Float>, progress: CGFloat, color: NSColor = .systemGreen) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if !aimConfigured {
+            aimConfigured = true
+            let r: CGFloat = 16
+            let ring = CGPath(ellipseIn: CGRect(x: -r, y: -r, width: 2 * r, height: 2 * r), transform: nil)
+            aimRing.path = ring
+            aimRing.fillColor = nil
+            aimRing.strokeColor = NSColor(white: 1, alpha: 0.85).cgColor
+            aimRing.lineWidth = 2
+            // Progress arc from 12 o'clock, clockwise.
+            let arc = CGMutablePath()
+            arc.addArc(center: .zero, radius: r, startAngle: .pi / 2, endAngle: .pi / 2 - 2 * .pi, clockwise: true)
+            aimFill.path = arc
+            aimFill.fillColor = nil
+            aimFill.lineWidth = 4
+            aimFill.lineCap = .round
+            aimDot.path = CGPath(ellipseIn: CGRect(x: -2.5, y: -2.5, width: 5, height: 5), transform: nil)
+            aimDot.fillColor = NSColor.white.cgColor
+        }
+        for l in [aimRing, aimFill, aimDot] where l.superlayer == nil { layer?.addSublayer(l) }
+        let pos = CGPoint(x: CGFloat(p.x) * bounds.width / (isSideBySide ? 2 : 1), y: bounds.height * (1 - CGFloat(p.y)))
+        for l in [aimRing, aimFill, aimDot] { l.position = pos }
+        aimFill.strokeColor = color.cgColor
+        aimFill.strokeEnd = min(max(progress, 0), 1)
+        aimFill.opacity = progress > 0.001 ? 1 : 0
+        CATransaction.commit()
+    }
+
+    func hideAim() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        [aimRing, aimFill, aimDot].forEach { $0.removeFromSuperlayer() }
+        CATransaction.commit()
+    }
+
     func hideHUD() {
         stickyText = nil
         hudHideWork?.cancel()

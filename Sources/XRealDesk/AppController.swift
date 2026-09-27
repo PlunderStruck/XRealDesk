@@ -90,6 +90,8 @@ final class AppController: ObservableObject {
     private var lastFrontPID: pid_t = 0
     /// Screen whose window should get keyboard focus once you've settled there and stopped typing.
     private var pendingFocus: (screen: Int, display: CGDirectDisplayID, since: CFTimeInterval)?
+    /// Guided tracking calibration in progress (Calibration.swift).
+    private var calibration: CalibrationSession?
     private let hotkeys = Hotkeys()
     private var cancellables = Set<AnyCancellable>()
 
@@ -277,6 +279,11 @@ final class AppController: ObservableObject {
             case "scan":    // rolling scan-out compensation: 0 off, 1 rows lit top to bottom, -1 bottom to top
                 if let x = Int(v), (-1...1).contains(x) { self.settings.scanOut = x }
                 self.hud(["Scan compensation: bottom → top", "Scan compensation off", "Scan compensation: top → bottom"][self.settings.scanOut + 1])
+            case "calibrate":   // guided tracking calibration: 1 start, 0 cancel
+                // "screenN" starts it on glasses screen N (tests).
+                if v == "0" { self.calibration?.cancel() }
+                else if v == "autopilot" { self.startCalibration(); self.calibration?.autopilot = true }
+                else { self.startCalibration(screen: v.hasPrefix("screen") ? Int(v.dropFirst(6)).map { $0 - 1 } : nil) }
             case "predictor":   // head prediction: 1 = learned (default), 0 = constant speed, for comparing
                 self.hid.learnedPrediction = v != "0"
                 self.hud(self.hid.learnedPrediction ? "Learned prediction" : "Constant-speed prediction")
@@ -881,6 +888,37 @@ final class AppController: ObservableObject {
 
     // MARK: Actions
 
+    /// Starts the guided tracking calibration on the glasses screen you're facing.
+    func startCalibration(screen requested: Int? = nil) {
+        guard calibration == nil, let compositor, !glassesOff, let win = window else {
+            Log.info("Calibration needs the glasses on and the screens up")
+            return
+        }
+        let out = compositor.output
+        let index = requested ?? out.gazeIndex ?? virtualDisplays.screens.first?.index ?? 0
+        guard let vs = virtualDisplays.screens.first(where: { $0.index == index }),
+              let screen = DisplayConfigurator.screen(for: vs.id) else { return }
+        let session = CalibrationSession(screen: screen, index: index,
+                                         widthDegrees: Float(settings.screenWidthDegrees), hid: hid)
+        session.fallbackScreens = virtualDisplays.screens.filter { $0.index != index }
+            .compactMap { s in DisplayConfigurator.screen(for: s.id).map { (s.index, $0) } }
+        session.showInstruction = { [weak win] text in
+            if let text { win?.hostView.showHUD(text, seconds: 0) } else { win?.hostView.hideHUD() }
+        }
+        session.showAim = { [weak win] p, progress, color in
+            if let p { win?.hostView.showAim(at: p, progress: progress, color: color) } else { win?.hostView.hideAim() }
+        }
+        session.predictionMs = { [weak self] in self?.settings.predictionMs ?? 14 }
+        session.setPredictionMs = { [weak self] ms in self?.settings.predictionMs = ms }
+        session.onFinish = { [weak self] folder, completed in
+            self?.calibration = nil
+            if completed, let folder { self?.hud("Calibration saved") ; Log.info("Calibration data: \(folder.path)") }
+        }
+        calibration = session
+        pendingFocus = nil
+        session.start()
+    }
+
     func recenter() {
         focusIndex = centerPanelIndex()
         compositor?.send(.recenter(panel: focusIndex))
@@ -1091,7 +1129,14 @@ final class AppController: ObservableObject {
         lastGaze = out.gaze
         let screens = virtualDisplays.screens.map { (index: $0.index, id: $0.id) }
         // Gaze only while drawing: a paused compositor's last gaze must not move the pointer or focus.
-        let cursorIndex = cursor.tick(now: now, screens: screens, gazeIndex: compositor.isRunning && !glassesOff ? out.gaze : nil)
+        // (Not during calibration: following your gaze would move the pointer and keyboard focus.)
+        let cursorIndex = cursor.tick(now: now, screens: screens,
+                                      gazeIndex: compositor.isRunning && !glassesOff && calibration == nil ? out.gaze : nil)
+        if let cal = calibration {
+            if glassesOff { cal.cancel() } else {
+                cal.tick(now: now, gaze: out.gazeIndex == cal.screenIndex ? out.gazeUV : nil, aim: out.aim)
+            }
+        }
         compositor.setCursorScreen(cursorIndex)
 
         if live.gazeScreen != out.gaze { live.gazeScreen = out.gaze }
