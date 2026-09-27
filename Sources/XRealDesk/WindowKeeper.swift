@@ -182,16 +182,26 @@ final class WindowKeeper {
             target.origin.x = min(max(target.minX, sb.minX), sb.maxX - target.width)
             target.origin.y = min(max(target.minY, sb.minY), sb.maxY - target.height)
             let current = live.first { $0.id == e.windowID }
-            // Only skip a window that's on its own screen: after the screens are recreated, macOS
-            // often drops windows back onto glasses screens, just not the right ones.
-            if let current, WindowKeeper.screenIndex(of: current.bounds, screens: screens) == e.screen { skippedAlreadyThere += 1; continue }
+            // Skip a window that's on its own screen and where it was (macOS also nudges windows
+            // when screens are rearranged). One in full screen on its own screen is left alone:
+            // re-entering full screen would bring its Space to the front over your other windows.
+            if let current, WindowKeeper.screenIndex(of: current.bounds, screens: screens) == e.screen {
+                let inPlace = abs(current.bounds.minX - target.minX) < 4 && abs(current.bounds.minY - target.minY) < 4
+                    && abs(current.bounds.width - target.width) < 4 && abs(current.bounds.height - target.height) < 4
+                if inPlace || e.fullScreen == true { skippedAlreadyThere += 1; continue }
+            }
             jobs.append((e, target, current))
         }
         Log.info("Window memory: \(entries.count) remembered, \(jobs.count) to put back (\(skippedAlreadyThere) already on the glasses, \(skippedNoScreen) for screens that don't exist now)")
         guard !jobs.isEmpty else { completion(0); return }
+        // To bring back afterwards if a full-screen window had to be moved (see below).
+        let usedBefore = screens.compactMap { s in lastFocused[s.index].map { (s.index, $0) } }
+        let frontBefore = NSWorkspace.shared.frontmostApplication
+        let pidOf = Dictionary(live.map { ($0.id, $0.pid) }, uniquingKeysWith: { a, _ in a })
         axQueue.async { [weak self] in
             guard let self else { return }
             var moved = 0
+            var reenteredFullScreen = false
             var unmatched: [UInt32] = []
             var taken = Set<CGWindowID>()
             for job in jobs {
@@ -199,9 +209,29 @@ final class WindowKeeper {
                     var id: CGWindowID = 0
                     if _AXUIElementGetWindow(win, &id) == .success { taken.insert(id) }
                     self.move(win, to: job.target, fullScreen: job.entry.fullScreen == true)
+                    if job.entry.fullScreen == true { reenteredFullScreen = true }
                     moved += 1
                 } else {
                     unmatched.append(job.entry.windowID)
+                }
+            }
+            // Entering full screen shows that window's Space on its screen, hiding the windows you
+            // were using there: raise those again (switching each screen back to their Space).
+            if reenteredFullScreen {
+                Thread.sleep(forTimeInterval: 1.0)   // the enter-full-screen animation
+                // Through Accessibility (a background app's plain activate() is ignored by macOS):
+                // raise each screen's window and make its app frontmost, the previously frontmost
+                // app last so it ends up with the keyboard.
+                let front = frontBefore?.processIdentifier
+                let ordered = usedBefore.filter { pidOf[$0.1] != front } + usedBefore.filter { pidOf[$0.1] == front }
+                for (_, id) in ordered {
+                    guard let pid = pidOf[id], let win = self.axWindow(pid: pid, windowID: id) else { continue }
+                    var full: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(win, "AXFullScreen" as CFString, &full) == .success, (full as? Bool) == true { continue }
+                    AXUIElementSetAttributeValue(self.axApp(pid), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                    AXUIElementPerformAction(win, kAXRaiseAction as CFString)
+                    AXUIElementSetAttributeValue(win, kAXMainAttribute as CFString, kCFBooleanTrue)
+                    Thread.sleep(forTimeInterval: 0.3)
                 }
             }
             DispatchQueue.main.async {
@@ -448,11 +478,27 @@ final class WindowKeeper {
             for _ in 0..<30 where isFull() { Thread.sleep(forTimeInterval: 0.05) }
             Thread.sleep(forTimeInterval: 0.6)   // the exit animation finishes after the flag flips
         }
-        let result = move(win, to: r)
-        if fullScreen {
-            Thread.sleep(forTimeInterval: 0.2)
-            AXUIElementSetAttributeValue(win, key, kCFBooleanTrue)
+        var result = move(win, to: r)
+        guard fullScreen else { return result }
+        // Only go full screen once the window really is on its screen: entering too early (while
+        // the exit animation still runs) put it in full screen on the screen it was leaving.
+        func landed() -> Bool {
+            var v: CFTypeRef?
+            var p = CGPoint.zero
+            guard AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &v) == .success, let pv = v,
+                  AXValueGetValue(pv as! AXValue, .cgPoint, &p) else { return false }
+            return abs(p.x - r.minX) < 8 && abs(p.y - r.minY) < 40
         }
+        for attempt in 0..<20 where !landed() {
+            Thread.sleep(forTimeInterval: 0.1)
+            if attempt % 5 == 4 { result = move(win, to: r) }
+        }
+        guard landed() else {
+            Log.info("Window memory: a full-screen window didn't reach its screen; left it as a normal window")
+            return result
+        }
+        Thread.sleep(forTimeInterval: 0.2)
+        AXUIElementSetAttributeValue(win, key, kCFBooleanTrue)
         return result
     }
 

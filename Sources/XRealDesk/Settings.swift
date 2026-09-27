@@ -119,8 +119,45 @@ final class Settings: ObservableObject {
     }
 
     // Screens
-    @Published var screenCount: Int { didSet { d.set(screenCount, forKey: "screenCount") } }
-    @Published var rows: Int { didSet { d.set(rows, forKey: "rows") } }
+    @Published var screenCount: Int {
+        didSet {
+            d.set(screenCount, forKey: "screenCount")
+            if oldValue != screenCount { switchLook(from: layoutKey(count: oldValue, rows: rows, resolution: resolutionID)) }
+        }
+    }
+    @Published var rows: Int {
+        didSet {
+            d.set(rows, forKey: "rows")
+            if oldValue != rows { switchLook(from: layoutKey(count: screenCount, rows: oldValue, resolution: resolutionID)) }
+        }
+    }
+
+    // Each layout (screen count × rows × resolution) remembers its own curve, size and gap: going
+    // 2 → 1 → 2 screens brings back exactly how the two looked. A layout never used before keeps
+    // the current look (steppers) or takes its preset's (preset tiles).
+    private func layoutKey(count: Int, rows: Int, resolution: String) -> String { "\(count)x\(rows)-\(resolution)" }
+    private var currentLayoutKey: String { layoutKey(count: screenCount, rows: rows, resolution: resolutionID) }
+    private var switchingLayout = false
+    private func saveLook(as key: String) {
+        var looks = (d.dictionary(forKey: "layoutLooks") as? [String: [Double]]) ?? [:]
+        looks[key] = [curve, screenWidthDegrees, gapDegrees]
+        d.set(looks, forKey: "layoutLooks")
+    }
+    /// Restores the saved look of the current layout; false if it has none.
+    @discardableResult
+    private func restoreLook() -> Bool {
+        guard let v = (d.dictionary(forKey: "layoutLooks") as? [String: [Double]])?[currentLayoutKey], v.count == 3,
+              v.allSatisfy(\.isFinite) else { return false }
+        curve = min(max(v[0], 0), 1)
+        screenWidthDegrees = min(max(v[1], 16), 100)
+        gapDegrees = min(max(v[2], 0), 10)
+        return true
+    }
+    private func switchLook(from oldKey: String) {
+        guard !switchingLayout else { return }
+        saveLook(as: oldKey)
+        restoreLook()
+    }
     @Published var resolutionID: String { didSet { d.set(resolutionID, forKey: "resolution") } }
     @Published var hiDPI: Bool { didSet { d.set(hiDPI, forKey: "hiDPI") } }
     @Published var refreshRate: Int { didSet { d.set(refreshRate, forKey: "refreshRate") } }
@@ -151,6 +188,9 @@ final class Settings: ObservableObject {
     /// Put windows back on their glasses screens after restarts, unplugging, sleep.
     @Published var windowMemory: Bool { didSet { d.set(windowMemory, forKey: "windowMemory") } }
     @Published var predictionMs: Double { didSet { d.set(predictionMs, forKey: "predictionMs") } }
+    /// Neck model: turning or nodding swings your eyes around your neck, and the screens shift the
+    /// way real objects at their distance would.
+    @Published var neckModel: Bool { didSet { d.set(neckModel, forKey: "neckModel") } }
     /// Screens ignore head wobble smaller than this (degrees): typing, breathing. 0 = off.
     @Published var stabilityDegrees: Double { didSet { d.set(stabilityDegrees, forKey: "stabilityDegrees") } }
     /// Smooth-follow lag time constant, seconds (smaller = snappier).
@@ -218,7 +258,7 @@ final class Settings: ObservableObject {
             "refreshRate": 120, "glassesIsMain": false,
             "screenWidthDegrees": 33.0, "gapDegrees": 1.5, "curve": 0.55, "tiltDegrees": 0.0,
             "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
-            "predictionMs": 14.0, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
+            "predictionMs": 14.0, "neckModel": true, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
             "sharpen": 0.35, "subpixel": 2, "subpixelStrength": 1.0, "warmth": 0.0, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
             "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "glassesOffMoveDelay": 10.0, "diagnosticLog": false, "showInDock": true,
         ])
@@ -244,6 +284,7 @@ final class Settings: ObservableObject {
         windowMemory = d.bool(forKey: "windowMemory")
         predictionMs = Self.number(d, "predictionMs", 0, 40)
         stabilityDegrees = Self.number(d, "stabilityDegrees", 0, 0.4)
+        neckModel = d.bool(forKey: "neckModel")
         followLag = Self.number(d, "followLag", 0.05, 1.0)
         flickSensitivity = Self.number(d, "flickSensitivity", 0, 1)
         smartFlick = d.bool(forKey: "smartFlick")
@@ -279,11 +320,16 @@ final class Settings: ObservableObject {
     }
 
     func apply(_ p: LayoutPreset) {
+        saveLook(as: currentLayoutKey)
+        switchingLayout = true
         screenCount = p.count
         rows = p.rows
         resolution = p.resolution
-        screenWidthDegrees = p.widthDegrees
-        curve = p.curve
+        switchingLayout = false
+        if !restoreLook() {
+            screenWidthDegrees = p.widthDegrees
+            curve = p.curve
+        }
     }
 
     var matchingPreset: String? {
@@ -304,6 +350,7 @@ final class Settings: ObservableObject {
         lensCorrection = true
         predictionMs = 14
         stabilityDegrees = 0.03
+        neckModel = true
         followLag = 0.3
         cursorFollowsGaze = true
         keyboardFollowsGaze = true
@@ -319,7 +366,7 @@ final class Settings: ObservableObject {
     /// True when every recommended value is already set.
     var isRecommended: Bool {
         hiDPI && trackingMode == .smart && refreshRate == 120 && renderScale == 2 && lensCorrection && predictionMs == 14
-            && abs(stabilityDegrees - 0.03) < 0.001 && cursorFollowsGaze && keyboardFollowsGaze && windowMemory
+            && abs(stabilityDegrees - 0.03) < 0.001 && neckModel && cursorFollowsGaze && keyboardFollowsGaze && windowMemory
             && autoExtendDisplay && mirrorWhenQuitting
     }
 

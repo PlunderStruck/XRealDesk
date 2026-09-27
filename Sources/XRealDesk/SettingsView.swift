@@ -231,6 +231,11 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
+                Toggle("Neck model", isOn: $settings.neckModel)
+                Text("When you turn or nod, your eyes swing around your neck. With this on, the screens shift the way real objects would, which makes them feel more solidly in place. Turn it off if the screens seem to drift as you turn.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
                 DisclosureGroup("Advanced tuning") {
                     ValueSlider(symbol: "timer", title: "Prediction", value: $settings.predictionMs, range: 0...40, step: 1) {
                         String(format: "%.0f ms", $0)
