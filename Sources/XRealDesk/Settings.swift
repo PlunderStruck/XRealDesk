@@ -261,7 +261,7 @@ final class Settings: ObservableObject {
             "refreshRate": 120, "glassesIsMain": false,
             "screenWidthDegrees": 33.0, "gapDegrees": 1.5, "curve": 0.55, "tiltDegrees": 0.0,
             "trackingMode": TrackingMode.smart.rawValue, "cursorFollowsGaze": true, "keyboardFollowsGaze": true, "windowMemory": true,
-            "predictionMs": 14.0, "neckModel": true, "scanOut": 0, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
+            "predictionMs": 14.0, "neckModel": true, "scanOut": 1, "stabilityDegrees": 0.03, "followLag": 0.3, "flickSensitivity": 0.5, "smartFlick": false, "rollDegrees": 0.0, "screenDistance": 1.5,
             "sharpen": 0.35, "subpixel": 2, "subpixelStrength": 1.0, "warmth": 0.0, "focusDim": 0.25, "brightness": 1.0, "highlightCursorScreen": true, "cornerRadius": 0.018, "renderScale": 2.0, "lensCorrection": true,
             "autoExtendDisplay": true, "hotkeysEnabled": true, "showHUD": true, "mirrorWhenQuitting": true, "glassesOffMoveDelay": 10.0, "diagnosticLog": false, "showInDock": true,
         ])
@@ -355,6 +355,7 @@ final class Settings: ObservableObject {
         predictionMs = 14
         stabilityDegrees = 0.03
         neckModel = true
+        scanOut = 1   // the Air 2 Pro lights its rows top to bottom (user eye test: bottom-to-top made edges lean)
         followLag = 0.3
         cursorFollowsGaze = true
         keyboardFollowsGaze = true
@@ -370,7 +371,7 @@ final class Settings: ObservableObject {
     /// True when every recommended value is already set.
     var isRecommended: Bool {
         hiDPI && trackingMode == .smart && refreshRate == 120 && renderScale == 2 && lensCorrection && predictionMs == 14
-            && abs(stabilityDegrees - 0.03) < 0.001 && neckModel && cursorFollowsGaze && keyboardFollowsGaze && windowMemory
+            && abs(stabilityDegrees - 0.03) < 0.001 && neckModel && scanOut == 1 && cursorFollowsGaze && keyboardFollowsGaze && windowMemory
             && autoExtendDisplay && mirrorWhenQuitting
     }
 
