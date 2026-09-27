@@ -1153,7 +1153,9 @@ final class AppController: ObservableObject {
            let gid = glassesDisplayID, CGDisplayIsAsleep(gid) == 0,
            now - max(out.lastFrameAt, watchdogArmedAt) > 1.5, now - lastStallRecovery > 10 {
             lastStallRecovery = now
-            Log.error(String(format: "Renderer stalled (no frame for %.1f s): sampling threads, then restarting it", now - out.lastFrameAt))
+            // Stalled time counts from when frames were due (not across a deliberate pause).
+            Log.error(String(format: "Renderer stalled (no frame for %.1f s): sampling threads, then restarting it",
+                             now - max(out.lastFrameAt, watchdogArmedAt)))
             let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/XRealDesk")
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"
