@@ -66,6 +66,9 @@ final class AppController: ObservableObject {
     /// Just-in-time frame start (`set jit=1`): measured to gain < 1 ms here (the GPU is shared with
     /// WindowServer, so there's little slack before the deadline), so off by default.
     private var lateStart = false
+    private var presentDelay = 0
+    private var handoffOffset: Double?
+    private var followPresentation = true
     /// Record window positions at the next quiet moment (e.g. after the first check following a restore).
     private var needsWindowSnapshot = true
     /// Capture size relative to the screen's pixels (`set capturescale=`, for measuring).
@@ -225,6 +228,16 @@ final class AppController: ObservableObject {
             case "subpixelstrength": if let x = Double(v) { self.settings.subpixelStrength = min(max(x, 0), 1) }
             case "subpixel":   // experiment: 0 off, 1 RGB, 2 BGR (across), 3 RGB, 4 BGR (down)
                 self.settings.subpixel = min(max(Int(v) ?? 0, 0), 4)
+            case "presentdelay":   // refreshes after the display link's target to show each frame (0 or 1)
+                if let x = Int(v), (0...2).contains(x) { self.presentDelay = x; self.pushConfig() }
+            case "followpresent":   // predict for when frames are actually shown: 1 on (default), 0 off
+                self.followPresentation = v != "0"; self.pushConfig()
+            case "handoff":   // experiment: start frames at deadline + N ms ("off" = normal)
+                self.handoffOffset = Double(v).map { $0 / 1000 }; self.pushConfig()
+            case "hud":     // show a message in the glasses (test cues)
+                self.hud(v)
+            case "trace":   // record every frame for N seconds (frames.csv), to find stutters
+                self.compositor?.send(.trace(Double(v) ?? 10))
             case "stall":   // test: freeze the render thread for N seconds (the watchdog should recover)
                 self.compositor?.send(.stall(Double(v) ?? 3))
             case "diagnostics": self.settings.diagnosticLog = v == "1"
@@ -1249,6 +1262,9 @@ final class AppController: ObservableObject {
         c.flat3D = !stereoDepth
         c.neckModel = settings.neckModel
         c.lateStart = lateStart
+        c.presentDelay = presentDelay
+        c.handoffOffset = handoffOffset
+        c.followPresentation = followPresentation
         c.preview = preview
         return c
     }

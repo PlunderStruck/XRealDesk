@@ -29,6 +29,15 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         /// Side-by-side output but the same flat picture in both eyes (no depth). Default: depth felt
         /// warpy on head turns (60 Hz, rotation-only tracking) while the flat picture felt clean.
         var flat3D = true
+        /// Show every frame this many refreshes after the display link's target. macOS showed frames
+        /// on time or one refresh late, flipping between the two (measured with presented times):
+        /// predicted for the wrong moment half the time, it read as jolts while panning. A fixed
+        /// extra refresh is always met, so every frame appears exactly when it was predicted for.
+        var presentDelay = 0
+        /// Predict for when macOS is actually showing frames (see presentationLateness).
+        var followPresentation = true
+        /// Experiment (`set handoff=ms`): start each frame at the display link's deadline + this.
+        var handoffOffset: Double?
         /// Just-in-time frames: wait until the latest safe moment before reading the head pose.
         var lateStart = true
         /// Flat pictures (2D, or the same picture in both eyes) also get the neck model, scaled to
@@ -50,6 +59,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         case snapshot(URL)
         /// Test only: block the render thread (exercises the stall watchdog).
         case stall(Double)
+        /// Record every frame for N seconds to ~/Library/Logs/XRealDesk/frames.csv.
+        case trace(Double)
     }
 
     struct Output {
@@ -122,6 +133,33 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
     private var lastDrawnView: simd_quatf?
     private var lastFrameView: simd_quatf?
     private var pictureMotion: Float = 0
+    private var traceUntil: CFTimeInterval = 0, traceRows: [String] = []
+    private let presentedLock = OSAllocatedUnfairLock(initialState: [(CFTimeInterval, CFTimeInterval)]())
+    /// How late (s) each recent frame appeared versus macOS's own schedule (last 5 frames).
+    private let latenessLock = OSAllocatedUnfairLock(initialState: [Double]())
+    private var latenessSum = 0.0
+
+    /// Median lateness of recent frames, snapped to whole refreshes (0 or 1 in practice).
+    private func presentationLateness(refresh: Double) -> Double {
+        let recent = latenessLock.withLock { $0 }
+        guard recent.count >= 3 else { return 0 }
+        let m = recent.sorted()[recent.count / 2]
+        return (min(max(m / refresh, 0), 2)).rounded() * refresh
+    }
+
+    /// Hooked to every presented frame: records how late it appeared.
+    private func installPresentationFeedback() {
+        let lateness = latenessLock
+        let trace = presentedLock
+        renderer.onPresented = { [weak self] target, actual in
+            guard actual > 0 else { return }   // never shown (replaced by a newer frame)
+            lateness.withLock { r in
+                r.append(actual - target)
+                if r.count > 5 { r.removeFirst(r.count - 5) }   // 5: fastest to follow a switch (simulated on recorded timings)
+            }
+            if self?.traceUntil ?? 0 > 0 { trace.withLock { $0.append((target, actual)) } }
+        }
+    }
     // Just-in-time frames (render thread).
     private var jitGPU = [Double](repeating: 0.004, count: 240), jitIndex = 0, jitGPUp98 = 0.004
     private var jitBackoff = 0.0, lastLateWait = 0.0, lateWaitSum = 0.0
@@ -249,6 +287,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         // 120 Hz, 50 ms at 60 Hz, for latency 1 or 2), so the head prediction covers that instead.
         link.preferredFrameLatency = 2
         link.add(to: .current, forMode: .default)
+        installPresentationFeedback()
         Log.info("Render thread started")
         while ctx.isAlive {
             CFRunLoopRunInMode(.defaultMode, 0.25, false)
@@ -320,7 +359,15 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         // prediction error grows with the square of how far ahead it has to guess.
         lastLateWait = 0
         var sampleNow = now
-        if cfg.lateStart {
+        if let offset = cfg.handoffOffset {
+            // Experiment: start the frame at deadline + offset.
+            let wakeAt = deadline + offset
+            if wakeAt - now > 0, wakeAt - now < 0.02 {
+                Compositor.wait(until: wakeAt)
+                sampleNow = CACurrentMediaTime()
+                lastLateWait = sampleNow - now
+            }
+        } else if cfg.lateStart {
             let budget = min(max(jitGPUp98 + 0.0006 + 0.0015 + jitBackoff, 0.0025), 0.008)
             let wakeAt = deadline - budget
             if wakeAt - now > 0.0003, wakeAt - now < 0.012 {
@@ -331,9 +378,15 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         }
         lateWaitSum += lastLateWait
         jitBackoff = max(0, jitBackoff - Double(dt) * 0.0001)   // relax slowly (0.1 ms per second)
-        let target = presentAt + cfg.predictionSeconds + max(0, 0.5 / Double(targetFPS) - 0.5 / 120)
+        // macOS shows frames either on time or one refresh late, in stretches of seconds that
+        // follow WindowServer's load (measured). Predict for when frames are actually appearing:
+        // the typical lateness of the last few frames, from macOS's own presentation reports.
+        let refresh = 1 / Double(targetFPS)
+        let lateness = cfg.followPresentation ? presentationLateness(refresh: refresh) : 0
+        let showAt = presentAt + Double(cfg.presentDelay) / Double(targetFPS) + lateness
+        let target = showAt + cfg.predictionSeconds + max(0, 0.5 / Double(targetFPS) - 0.5 / 120)
         horizonSum += target - sampleNow; horizonN += 1
-        presentSum += presentAt - now; deadlineSum += deadline - now
+        presentSum += showAt - now; deadlineSum += deadline - now
         var head = lastHead
         var tracking = false
         var headSpeed: Float = 0
@@ -556,6 +609,8 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         } else {
             scanRotation = .zero
         }
+        var renderedThisFrame = false
+        renderer.presentTarget = presentAt   // lateness is measured against macOS's own schedule
         if !viewMoved, key == lastDrawnKey, pendingSnapshot == nil {
             unchangedFrames += 1
         } else if let target = drawable(), renderer.render(drawable: target, eyes: eyes,
@@ -563,6 +618,7 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
                                   snapshotTo: pendingSnapshot) {
             pendingSnapshot = nil
             lastDrawnView = viewRot
+            renderedThisFrame = true
             // Recent GPU frame times for the just-in-time budget (the value of the last finished frame).
             let g = renderer.lastGPUMs / 1000
             if g > 0, g != lastGPUSeen {
@@ -576,13 +632,33 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
                 guard let f = d.frame, f.seq != shownSeq[d.index] else { continue }
                 if let prev = shownSeq[d.index], f.seq > prev + 1 { unshownCaptures[d.index, default: 0] += Int(f.seq - prev - 1) }
                 shownSeq[d.index] = f.seq
-                captureToGlassesSum[d.index, default: 0] += presentAt - f.arrival
+                captureToGlassesSum[d.index, default: 0] += showAt - f.arrival
                 captureShown[d.index, default: 0] += 1
             }
         }
 
         // Publish for the UI / cursor controller.
         let (vy, vp) = SpatialMath.yawPitch(of: layout.tiltRotation.inverse * viewNoRoll.inverse)
+        // Frame trace (`set trace=N`): every callback for N seconds, to find stutters in motion.
+        if traceUntil > 0 {
+            let (ry, rp) = SpatialMath.yawPitch(of: rawHead)
+            traceRows.append(String(format: "%.6f,%.6f,%.6f,%d,%.5f,%.5f,%.5f,%.5f,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f",
+                                    now, presentAt, deadline, renderedThisFrame ? 1 : 0,
+                                    SpatialMath.degrees(vy), SpatialMath.degrees(vp), SpatialMath.degrees(ry), SpatialMath.degrees(rp),
+                                    SpatialMath.degrees(headSpeed), pictureMotion, renderer.lastGPUMs, lastCallbackCPUMs, lastLateWait * 1000,
+                                    lateness * 1000))
+            if now > traceUntil {
+                let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/XRealDesk")
+                let url = dir.appendingPathComponent("frames.csv")
+                let text = "t,present,deadline,rendered,viewYaw,viewPitch,headYaw,headPitch,headSpeed,motion,gpuMs,cpuMs,lateMs,predictedLateMs\n" + traceRows.joined(separator: "\n") + "\n"
+                try? text.write(to: url, atomically: true, encoding: .utf8)
+                let presented = presentedLock.withLock { $0 }
+                let ptext = "target,actual\n" + presented.map { String(format: "%.6f,%.6f", $0.0, $0.1) }.joined(separator: "\n") + "\n"
+                try? ptext.write(to: dir.appendingPathComponent("presented.csv"), atomically: true, encoding: .utf8)
+                Log.info("Frame trace written: \(traceRows.count) frames → \(url.path)")
+                traceUntil = 0; traceRows.removeAll()
+            }
+        }
         frameCount += 1
         var fps: Double?
         if now - fpsWindowStart >= 1 {
@@ -674,6 +750,10 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
                 if let index { renderer.forget(index: index) } else { renderer.forgetAll() }
             case .snapshot(let url):
                 pendingSnapshot = url
+            case .trace(let seconds):
+                traceRows.removeAll(); traceRows.reserveCapacity(Int(seconds * 130))
+                presentedLock.withLock { $0.removeAll() }
+                traceUntil = CACurrentMediaTime() + min(max(seconds, 1), 60)
             case .stall(let seconds):
                 Log.info("Test: blocking the render thread for \(seconds) s")
                 Thread.sleep(forTimeInterval: min(max(seconds, 0), 10))

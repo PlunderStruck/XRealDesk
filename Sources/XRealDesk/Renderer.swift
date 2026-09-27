@@ -117,6 +117,9 @@ final class Renderer {
     private var cursorGammaTexture: MTLTexture?
     private var motion: Float = 0          // 0 still … 1 moving (render thread)
     private var scanRotation = SIMD3<Float>(repeating: 0)   // eye-frame head rotation over one scan-out
+    /// Frame trace: called with (intended presentation time, actual presentation time or 0).
+    var onPresented: ((CFTimeInterval, CFTimeInterval) -> Void)?
+    var presentTarget: CFTimeInterval = 0
     private var frameIndex: UInt32 = 0
     private var mipGamma: [Int: MTLTexture] = [:]
     private let sampler: MTLSamplerState
@@ -361,7 +364,13 @@ final class Renderer {
                 cb.addCompletedHandler { _ in Renderer.writePNG(other, to: url) }
             }
         }
-        cb.present(drawable)
+        // When the frame really reached the display (0 = it never did): the only way to see
+        // frames WindowServer showed late or dropped after we delivered them on time.
+        if let onPresented {
+            let target = presentTarget
+            drawable.addPresentedHandler { d in onPresented(target, d.presentedTime) }
+        }
+        cb.present(drawable)   // display-link drawables can't be presented at a chosen time (it throws)
         let sem = inFlight
         let gpu = gpuLock
         cb.addCompletedHandler { cb in
