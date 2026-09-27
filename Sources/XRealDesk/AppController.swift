@@ -96,6 +96,8 @@ final class AppController: ObservableObject {
     /// screen showed its content up to 0.1 s old, then snapped to current (a hop); in a blind A/B
     /// the user preferred full rate everywhere, and dropped frames didn't change.
     private var captureThrottle = false
+    private var blindMapping: [HeadPredictor.Model] = []
+    private var blindIndex = 0
     /// Scan-out compensation strength (`set scanscale=0.4`; see Compositor.Config.scanScale).
     private var scanScale: Float = 0.4
 
@@ -298,7 +300,7 @@ final class AppController: ObservableObject {
                 if v == "0" { self.calibration?.cancel() }
                 else if v == "autopilot" { self.startCalibration(); self.calibration?.autopilot = true }
                 else { self.startCalibration(screen: v.hasPrefix("screen") ? Int(v.dropFirst(6)).map { $0 - 1 } : nil) }
-            case "predictor":   // head prediction: 1 = learned, blended (default), 2 = first learned fit, 0 = constant speed
+            case "predictor":   // head prediction: 3 = hybrid with neural net (default), 1 = blended linear, 2 = first fit, 0 = constant speed
                 self.hid.predictionModel = Int(v).flatMap(HeadPredictor.Model.init(rawValue:))
             case "steady":  // steady tracking: 1 = on (default), 0 = the previous tracking, for comparing
                 self.hid.steadyTracking = v != "0"
@@ -1032,6 +1034,18 @@ final class AppController: ObservableObject {
             settings.subpixel = (settings.subpixel + 1) % 5
             let names = ["Off", "RGB  (1)", "BGR  (2)", "RGB, vertical  (3)", "BGR, vertical  (4)"]
             hud("Subpixel text: \(names[settings.subpixel])")
+        case .blindCompare:
+            // Blind A/B of two head predictors: which is A and which is B is random per launch and
+            // written to ab-mapping.txt only (read it after deciding).
+            if blindMapping.isEmpty {
+                blindMapping = [HeadPredictor.Model.blended, .hybrid].shuffled()
+                let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/XRealDesk")
+                try? "A=\(blindMapping[0]) B=\(blindMapping[1])\n".write(to: dir.appendingPathComponent("ab-mapping.txt"), atomically: true, encoding: .utf8)
+                blindIndex = 1
+            }
+            blindIndex = 1 - blindIndex
+            hid.predictionModel = blindMapping[blindIndex]
+            window?.hostView.showHUD(blindIndex == 0 ? "Model A" : "Model B")
         case .toggleGazeCursor:
             settings.cursorFollowsGaze.toggle()
             hud(settings.cursorFollowsGaze ? "Cursor follows gaze: on" : "Cursor follows gaze: off")

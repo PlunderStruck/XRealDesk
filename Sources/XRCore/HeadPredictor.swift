@@ -86,7 +86,14 @@ public struct HeadPredictor: Sendable {
         case blended = 1
         /// The first single fit, kept for comparing.
         case previous = 2
+        /// The still-head linear fit while (nearly) still, a small neural net while moving: on
+        /// held-out calibration sessions the net cut eye-visible jitter while panning by ~15%.
+        case hybrid = 3
     }
+
+    /// Head speed (°/s) over which the neural net takes over from the still-head fit (hybrid).
+    /// Held-out sessions: 2–8°/s beat 5–20°/s (slow movement 0.73 vs 0.77 px jitter).
+    static let hybridDegreesPerSecond: (start: Float, full: Float) = (2, 8)
 
     /// Head speed (°/s) over the last ~32 ms, from the features.
     static func speed(_ f: Features) -> Float {
@@ -101,6 +108,13 @@ public struct HeadPredictor: Sendable {
         switch model {
         case .previous:
             return rotation(f, seconds: seconds, weights: weightsPrevious)
+        case .hybrid:
+            let (lo, hi) = hybridDegreesPerSecond
+            let x = min(max((speed(f) - lo) / max(hi - lo, 1e-3), 0), 1)
+            let t = x * x * (3 - 2 * x)
+            let still = rotation(f, seconds: seconds, weights: weightsStill)
+            guard t > 0, let net = netRotation(f, seconds: seconds) else { return still }
+            return still * (1 - t) + net * t
         case .blended:
             let (lo, hi) = blendDegreesPerSecond
             let x = min(max((speed(f) - lo) / max(hi - lo, 1e-3), 0), 1)
@@ -110,6 +124,44 @@ public struct HeadPredictor: Sendable {
             return rotation(f, seconds: seconds, weights: weightsStill) * (1 - t)
                  + rotation(f, seconds: seconds, weights: weightsMoving) * t
         }
+    }
+
+    /// The neural net's rotation (radians, head frame) over `seconds`, or nil if it isn't usable.
+    static func netRotation(_ f: Features, seconds: Double) -> SIMD3<Float>? {
+        let sizes = netSizes
+        let hs = horizonsMs
+        guard sizes.count == 4, sizes[0] == featureCount, sizes[3] == 3 * hs.count,
+              netW1.count == sizes[0] * sizes[1], netW2.count == sizes[1] * sizes[2], netW3.count == sizes[2] * sizes[3],
+              let first = hs.first, let last = hs.last else { return nil }
+        let ms = Float(seconds * 1000)
+        guard ms > 0 else { return .zero }
+        var x = [Float](repeating: 0, count: sizes[0])
+        for i in 0..<sizes[0] { x[i] = (f.values[i] - netMean[i]) / max(netScale[i], 1e-12) }
+        func layer(_ input: [Float], _ w: [Float], _ b: [Float], _ n: Int, tanh apply: Bool) -> [Float] {
+            var out = b
+            for i in 0..<input.count {
+                let v = input[i]
+                if v == 0 { continue }
+                let row = i * n
+                for j in 0..<n { out[j] += v * w[row + j] }
+            }
+            if apply { for j in 0..<n { out[j] = tanhf(out[j]) } }
+            return out
+        }
+        let h1 = layer(x, netW1, netB1, sizes[1], tanh: true)
+        let h2 = layer(h1, netW2, netB2, sizes[2], tanh: true)
+        let o = layer(h2, netW3, netB3, sizes[3], tanh: false)
+        func at(_ k: Int) -> SIMD3<Float> { SIMD3(o[3 * k], o[3 * k + 1], o[3 * k + 2]) * (.pi / 180) }
+        let r: SIMD3<Float>
+        if ms <= first { r = at(0) * (ms / first) }
+        else if ms >= last { r = at(hs.count - 1) * (ms / last) }
+        else {
+            var k = 0
+            while k + 1 < hs.count && hs[k + 1] < ms { k += 1 }
+            let t = (ms - hs[k]) / (hs[k + 1] - hs[k])
+            r = at(k) * (1 - t) + at(k + 1) * t
+        }
+        return r.x.isFinite && r.y.isFinite && r.z.isFinite ? r : nil
     }
 
     private static func rotation(_ f: Features, seconds: Double, weights: [[SIMD3<Float>]]) -> SIMD3<Float> {

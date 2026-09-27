@@ -164,7 +164,7 @@ public final class GlassesHIDService: @unchecked Sendable {
         get { learnedLock.withLock { $0 } }
         set { learnedLock.withLock { $0 = newValue } }
     }
-    private let learnedLock = OSAllocatedUnfairLock<HeadPredictor.Model?>(initialState: .blended)
+    private let learnedLock = OSAllocatedUnfairLock<HeadPredictor.Model?>(initialState: .hybrid)
     private var headPredictor = HeadPredictor()
     private var steadyApplied = true
 

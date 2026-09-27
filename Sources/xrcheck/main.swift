@@ -241,13 +241,14 @@ func unitChecks() {
         check(worst < 0.01, String(format: "rotation angle exact to %.2f%% from 0.0005° to 0.1°", worst * 100))
     }
 
-    print("learned head prediction")
+    for model in [HeadPredictor.Model.blended, .hybrid] {
+    print("learned head prediction (\(model))")
     do {
         typealias Pose = GlassesHIDService.Pose
         func pose(_ hp: HeadPredictor, rate: SIMD3<Float>) -> Pose {
             var p = Pose(orientation: simd_quatf(ix: 0, iy: 0, iz: 0, r: 1), angularVelocity: rate, hostTime: 0,
                          isStill: false, warmedUp: true)
-            p.learned = true; p.features = hp.features
+            p.learned = true; p.features = hp.features; p.learnedModel = model
             return p
         }
         // A steady turn is predicted to carry on at the same speed.
@@ -268,6 +269,7 @@ func unitChecks() {
         for _ in 0..<600 { hp.add(gyro: .zero, accel: SIMD3(0, 1, 0)) }
         let still = SpatialMath.degrees(Pose.rotationAngle(pose(hp, rate: .zero).predicted(to: 0.04)))
         check(still < 1e-3, String(format: "recovers: still head predicted still (%.4f°)", still))
+    }
     }
 
     print("screens hold still through body motion")
@@ -594,6 +596,7 @@ func replay(csv: String, calibrationPath: String) {
         /// Learned prediction (HeadPredictor) in the app's Pose.
         var learned = false
         var previousFit = false
+        var hybrid = false
     }
     // What the learned predictor sees at every sample.
     var feats: [HeadPredictor.Features?] = []
@@ -605,6 +608,7 @@ func replay(csv: String, calibrationPath: String) {
         .init(name: "APP CODE (Pose.predicted)", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, appPose: true),
         .init(name: "APP CODE, stability off", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0, appPose: true),
         .init(name: "LEARNED, stability off", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0, appPose: true, learned: true),
+        .init(name: "HYBRID (linear still + net moving)", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0, appPose: true, learned: true, hybrid: true),
         .init(name: "LEARNED previous (first fit)", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0, appPose: true, learned: true, previousFit: true),
         .init(name: "APP CODE, stability 0.01", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.01, appPose: true),
         .init(name: "SHIPPED: always, vel 8ms, cap 1.5x", fadeStart: 0, fadeFull: 0.001, velTau: 0.008, leash: 0.03, clamp: 1.5),
@@ -677,7 +681,7 @@ func replay(csv: String, calibrationPath: String) {
                                                   warmedUp: true, recentRotation: GlassesHIDService.Pose.rotationAngle(d),
                                                   angularAcceleration: (appAccFast - appAccSlow) / Float(taus.slow - taus.fast))
                 var p2 = pose
-                if c.learned { p2.learned = true; p2.features = feats[i]; p2.learnedModel = c.previousFit ? .previous : .blended }
+                if c.learned { p2.learned = true; p2.features = feats[i]; p2.learnedModel = c.hybrid ? .hybrid : c.previousFit ? .previous : .blended }
                 let rendered = st.update(head: p2.predicted(to: R + ahead, maxAhead: maxAhead), angularSpeed: speed, dt: Float(frame))
                 let truth = q[sampleIndex(at: R + ahead)]
                 let trueSpeed = simd_length(w[sampleIndex(at: R + ahead)])
