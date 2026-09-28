@@ -15,6 +15,11 @@ final class LiveState: ObservableObject {
     /// Head yaw/pitch relative to the layout, radians.
     @Published var viewYawPitch = SIMD2<Float>(0, 0)
     @Published var renderFPS: Double = 0
+    /// Which tracking model is in use (Settings > Tracking), and whether one is being trained.
+    @Published var personalModelStatus = ""
+    @Published var trainingModel = false
+    @Published var hasPersonalModel = false
+    @Published var recordedSessions = 0
     @Published var imuRate: Double = 0
     /// The glasses are in their side-by-side 3D mode (button), running at 60 Hz.
     @Published var sideBySide = false
@@ -90,8 +95,8 @@ final class AppController: ObservableObject {
     private var lastFrontPID: pid_t = 0
     /// Screen whose window should get keyboard focus once you've settled there and stopped typing.
     private var pendingFocus: (screen: Int, display: CGDirectDisplayID, since: CFTimeInterval)?
-    /// Guided tracking calibration in progress (Calibration.swift).
-    private var calibration: CalibrationSession?
+    /// Guided tracking session in progress (TrackingSession.swift).
+    private var calibration: TrackingSession?
     /// Capture screens out of view at a trickle (`set capturethrottle=1`). Off: panning onto a
     /// screen showed its content up to 0.1 s old, then snapped to current (a hop); in a blind A/B
     /// the user preferred full rate everywhere, and dropped frames didn't change.
@@ -146,6 +151,7 @@ final class AppController: ObservableObject {
             self?.deviceInfo = info
             if let serial = info?.serial {
                 self?.restoreRotation(for: serial)
+                self?.loadPersonalModel(serial: serial)
             }
         }
         hid.onButton = { phys, virt, value in Log.info("Glasses button phys=\(phys) virt=\(virt) value=\(value)") }
@@ -931,31 +937,109 @@ final class AppController: ObservableObject {
 
     // MARK: Actions
 
-    /// Starts the guided tracking calibration on the glasses screen you're facing.
+    // MARK: Personal tracking model
+
+    private func loadPersonalModel(serial: String) {
+        let saved = PersonalModel.load(serial: serial)
+        if let s = saved, let m = PersonalModel.model(s) {
+            HeadPredictor.current = m
+            Log.info("Using the personal tracking model for headset \(serial)")
+        } else {
+            HeadPredictor.current = HeadPredictor.shipped
+        }
+        refreshPersonalModelStatus()
+    }
+
+    func refreshPersonalModelStatus() {
+        let serial = deviceInfo?.serial
+        let saved = serial.flatMap(PersonalModel.load)
+        let sessions = PersonalModel.sessions().count
+        live.recordedSessions = sessions
+        live.hasPersonalModel = saved != nil
+        live.personalModelStatus = PersonalModel.status(saved, sessions: sessions)
+    }
+
+    /// Trains a model from the recorded sessions and uses it only if it's clearly steadier than the
+    /// shipped one on held-back parts of those sessions. A few seconds, off the main thread.
+    func trainPersonalModel() {
+        guard !live.trainingModel else { return }
+        guard let serial = deviceInfo?.serial else { hud("Connect your glasses to train a tracking model"); return }
+        let sessions = PersonalModel.sessions()
+        guard !sessions.isEmpty else { hud("Record a tracking session first"); return }
+        let cal = hid.calibration
+        live.trainingModel = true
+        window?.hostView.showHUD("Training your tracking model…", seconds: 0)
+        var lastShown = -1
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = PersonalTrainer.train(sessions: sessions, calibration: cal) { p in
+                let pct = Int(p * 10) * 10
+                DispatchQueue.main.async {
+                    guard pct != lastShown else { return }
+                    lastShown = pct
+                    self?.window?.hostView.showHUD("Training your tracking model… \(pct)%", seconds: 0)
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.live.trainingModel = false
+                self.window?.hostView.hideHUD()
+                guard let r = result else {
+                    self.hud("Not enough recorded motion to train a model yet")
+                    return
+                }
+                Log.info(String(format: "Personal model: jitter while moving %.3f → %.3f px, still %.3f → %.3f px (%.0f min)",
+                                r.shipped.moving, r.personal.moving, r.shipped.still, r.personal.still, r.minutes))
+                let gain = (1 - r.personal.moving / max(r.shipped.moving, 1e-6)) * 100
+                if r.isBetter {
+                    PersonalModel.save(r, serial: serial)
+                    HeadPredictor.current = r.model
+                    self.window?.hostView.showHUD(String(format: "Your tracking model is %.0f%% steadier while moving: using it", gain), seconds: 4)
+                } else {
+                    self.window?.hostView.showHUD(String(format: "Your model wasn't clearly steadier (%+.0f%%): keeping the current one", gain), seconds: 4)
+                }
+                self.refreshPersonalModelStatus()
+            }
+        }
+    }
+
+    /// Back to the shipped tracking model (the personal one is deleted).
+    func useDefaultTrackingModel() {
+        if let serial = deviceInfo?.serial { PersonalModel.remove(serial: serial) }
+        HeadPredictor.current = HeadPredictor.shipped
+        refreshPersonalModelStatus()
+        hud("Using the default tracking model")
+    }
+
+    /// Starts a guided tracking session across the glasses screens (the one you face shows the text).
     func startCalibration(screen requested: Int? = nil) {
         guard calibration == nil, let compositor, !glassesOff, let win = window else {
-            Log.info("Calibration needs the glasses on and the screens up")
+            Log.info("A tracking session needs the glasses on and the screens up")
             return
         }
         let out = compositor.output
-        let index = requested ?? out.gazeIndex ?? virtualDisplays.screens.first?.index ?? 0
-        guard let vs = virtualDisplays.screens.first(where: { $0.index == index }),
-              let screen = DisplayConfigurator.screen(for: vs.id) else { return }
-        let session = CalibrationSession(screen: screen, index: index,
-                                         widthDegrees: Float(settings.screenWidthDegrees), hid: hid)
-        session.fallbackScreens = virtualDisplays.screens.filter { $0.index != index }
-            .compactMap { s in DisplayConfigurator.screen(for: s.id).map { (s.index, $0) } }
+        let homeIndex = requested ?? out.gazeIndex ?? virtualDisplays.screens.first?.index ?? 0
+        let width = Float(settings.screenWidthDegrees)
+        var screens: [TrackingSession.Screen] = []
+        for vs in virtualDisplays.screens {
+            guard let ns = DisplayConfigurator.screen(for: vs.id), let p = layout.panels.first(where: { $0.index == vs.index }) else { continue }
+            let aspect = Float(ns.frame.height / max(ns.frame.width, 1))
+            screens.append(TrackingSession.Screen(index: vs.index, yaw: SpatialMath.degrees(p.yaw), pitch: SpatialMath.degrees(p.pitch),
+                                                  width: width, height: width * aspect, window: SessionWindow(screen: ns)))
+        }
+        guard !screens.isEmpty else { return }
+        // The screen you face first: it shows the text and the start dots.
+        screens.sort { a, b in a.index == homeIndex ? true : b.index == homeIndex ? false : a.index < b.index }
+        let session = TrackingSession(screens: screens, hid: hid)
         session.showInstruction = { [weak win] text in
             if let text { win?.hostView.showHUD(text, seconds: 0) } else { win?.hostView.hideHUD() }
         }
         session.showAim = { [weak win] p, progress, color in
             if let p { win?.hostView.showAim(at: p, progress: progress, color: color) } else { win?.hostView.hideAim() }
         }
-        session.predictionMs = { [weak self] in self?.settings.predictionMs ?? 14 }
-        session.setPredictionMs = { [weak self] ms in self?.settings.predictionMs = ms }
         session.onFinish = { [weak self] folder, completed in
             self?.calibration = nil
-            if completed, let folder { self?.hud("Calibration saved") ; Log.info("Calibration data: \(folder.path)") }
+            self?.refreshPersonalModelStatus()
+            if completed, folder != nil { self?.hud("Session saved: train your model in Settings") }
         }
         calibration = session
         pendingFocus = nil
@@ -1189,7 +1273,8 @@ final class AppController: ObservableObject {
                                       gazeIndex: compositor.isRunning && !glassesOff && calibration == nil ? out.gaze : nil)
         if let cal = calibration {
             if glassesOff { cal.cancel() } else {
-                cal.tick(now: now, gaze: out.gazeIndex == cal.screenIndex ? out.gazeUV : nil, aim: out.aim)
+                cal.tick(now: now, gaze: out.gazeIndex.map { ($0, out.gazeUV) },
+                         headPitch: SpatialMath.degrees(out.viewYawPitch.y), aim: out.aim)
             }
         }
         compositor.setCursorScreen(cursorIndex)

@@ -241,9 +241,9 @@ struct SettingsView: View {
                 Toggle("Neck model", isOn: $settings.neckModel)
                 Text("When you turn or nod, your eyes swing around your neck. With this on, the screens shift the way real objects would, which makes them feel more solidly in place. Turn it off if the screens seem to drift as you turn.")
                     .font(.caption).foregroundStyle(.secondary)
-                Button("Calibrate tracking…") { app.startCalibration() }
-                Text("About 4 minutes of short guided tasks in the glasses (hold still, talk, type, follow a dot) plus a quick timing check. It records how your head moves so tracking can be tuned to you. Esc stops it at any time.")
-                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Your tracking model") {
+                PersonalModelControls(app: app, live: app.live)
             }
             Section {
                 DisclosureGroup("Advanced tuning") {
@@ -326,3 +326,21 @@ struct SettingsView: View {
     }
 }
 
+
+/// Record a session, train a personal model, or go back to the default one.
+private struct PersonalModelControls: View {
+    let app: AppController
+    @ObservedObject var live: LiveState
+    var body: some View {
+        Text(live.personalModelStatus).font(.callout)
+        HStack {
+            Button("Record a session…") { app.startCalibration() }
+            Button(live.trainingModel ? "Training…" : "Train my model") { app.trainPersonalModel() }
+                .disabled(live.trainingModel || live.recordedSessions == 0)
+            if live.hasPersonalModel { Button("Use default model") { app.useDefaultTrackingModel() } }
+        }
+        Text("A session is a few minutes of short guided tasks in the glasses. Training takes seconds on your Mac and uses every session you've recorded; the result is used only if it measures clearly steadier than the default model on parts of your sessions it didn't learn from. Nothing leaves your Mac.")
+            .font(.caption).foregroundStyle(.secondary)
+            .onAppear { app.refreshPersonalModelStatus() }
+    }
+}
