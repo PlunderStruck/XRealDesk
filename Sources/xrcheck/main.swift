@@ -790,6 +790,7 @@ if args.count > 3, args[1] == "wobble" {
     for csv in args[3...] { print("\n### \((csv as NSString).lastPathComponent)"); wobble(csv: csv, calibrationPath: args[2]) }
     exit(0)
 }
+if args.count > 3, args[1] == "train" { trainPersonal(sessions: Array(args[3...]), calibrationPath: args[2]); exit(0) }
 if args.count > 2, args[1] == "lensinfo" { lensInfo(calibrationPath: args[2]); exit(0) }
 if args.count > 4, args[1] == "dumpcal" { dumpCalibrated(csv: args[3], calibrationPath: args[2], out: args[4]); exit(0) }
 if args.count > 3, args[1] == "replay" {

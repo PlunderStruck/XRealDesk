@@ -174,3 +174,15 @@ func lensInfo(calibrationPath: String) {
     }
 }
 
+
+/// Trains a personal model offline from calibration sessions (imu.csv) and prints the comparison.
+func trainPersonal(sessions: [String], calibrationPath: String) {
+    guard let data = FileManager.default.contents(atPath: calibrationPath), let cal = GlassesCalibration.parse(json: data) else { print("can't read calibration"); return }
+    var o = PersonalTrainer.Options()
+    if ProcessInfo.processInfo.environment["SCRATCH"] != nil { o.fromScratch = true; o.epochs = 60; o.learningRate = 1e-3 }
+    let t0 = CFAbsoluteTimeGetCurrent()
+    guard let r = PersonalTrainer.train(sessions: sessions.map { URL(fileURLWithPath: $0) }, calibration: cal, options: o) else { print("not enough data"); return }
+    print(String(format: "  %.1f min of sessions, trained in %.1f s", r.minutes, CFAbsoluteTimeGetCurrent() - t0))
+    print(String(format: "  held-back jitter (px): shipped still %.3f moving %.3f panning %.3f", r.shipped.still, r.shipped.moving, r.shipped.panning))
+    print(String(format: "                        personal still %.3f moving %.3f panning %.3f  → %@", r.personal.still, r.personal.moving, r.personal.panning, r.isBetter ? "better, would be used" : "not clearly better, default kept"))
+}
