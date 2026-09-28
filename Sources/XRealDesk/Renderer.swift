@@ -117,6 +117,8 @@ final class Renderer {
     private var cursorGammaTexture: MTLTexture?
     private var motion: Float = 0          // 0 still … 1 moving (render thread)
     private var scanRotation = SIMD3<Float>(repeating: 0)   // eye-frame head rotation over one scan-out
+    /// World-locked overlay shapes (tracking session) and whether they replace the screens.
+    var overlay: (items: [RendererShaders.OverlayItem], hideScreens: Bool) = ([], false)
     /// Frame trace: called with (intended presentation time, actual presentation time or 0).
     var onPresented: ((CFTimeInterval, CFTimeInterval) -> Void)?
     var presentTarget: CFTimeInterval = 0
@@ -468,6 +470,9 @@ final class Renderer {
                 u.scanDir = style.scanDirection
                 u.scan = SIMD4(scanRotation, 0)
             }
+            var items = overlay.items.isEmpty ? [RendererShaders.OverlayItem(a: .zero, color: .zero)] : Array(overlay.items.prefix(64))
+            u.overlay = SIMD4(Float(overlay.items.isEmpty ? 0 : items.count), overlay.hideScreens ? 1 : 0, 0, 0)
+            enc.setFragmentBytes(&items, length: MemoryLayout<RendererShaders.OverlayItem>.stride * items.count, index: 2)
             enc.setViewport(MTLViewport(originX: Double(u.originX), originY: 0, width: Double(out.x), height: Double(out.y), znear: 0, zfar: 1))
             enc.setFragmentBytes(&u, length: MemoryLayout<RendererShaders.DirectUniforms>.stride, index: 0)
             enc.setFragmentTexture(map ?? dummyTexture, index: 0)

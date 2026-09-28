@@ -29,6 +29,8 @@ public enum RendererShaders {
         /// How far the head turns (eye frame, rotation vector in radians) while the display lights
         /// the picture from its first row to its last.
         public var scan = SIMD4<Float>(0, 0, 0, 0)
+        /// World-locked overlay shapes (tracking session): x = count, y = 1 hides the screens.
+        public var overlay = SIMD4<Float>(0, 0, 0, 0)
 
         public init(invView: simd_float4x4, focal: SIMD2<Float>, center: SIMD2<Float>, toCalibrated: SIMD2<Float>,
                     mapSize: SIMD2<Float>, mapStep: Float, lensOn: Float, originX: Float, radius: Float, distance: Float,
@@ -41,6 +43,23 @@ public enum RendererShaders {
             self.quality = quality; self.panelCount = panelCount; self.subpixel = subpixel
             self.subpixelStrength = subpixelStrength; self.frame = frame; self.motion = motion; self.dither = dither
             self.white = white
+        }
+    }
+
+    /// A world-locked shape on the layout surface (arc length, height; metres). kind (a.w):
+    /// 0 filled circle (a.xy centre, a.z radius), 1 frame outline (a.xy centre, b.xy half size,
+    /// b.z line width), 2 filled square (a.xy centre, a.z half size). color: linear RGB + opacity.
+    public struct OverlayItem {
+        public var a: SIMD4<Float>, b: SIMD4<Float>, color: SIMD4<Float>
+        public init(a: SIMD4<Float>, b: SIMD4<Float> = .zero, color: SIMD4<Float>) { self.a = a; self.b = b; self.color = color }
+        public static func circle(_ c: SIMD2<Float>, radius: Float, color: SIMD4<Float>) -> OverlayItem {
+            OverlayItem(a: SIMD4(c.x, c.y, radius, 0), color: color)
+        }
+        public static func frame(_ c: SIMD2<Float>, halfSize: SIMD2<Float>, line: Float, color: SIMD4<Float>) -> OverlayItem {
+            OverlayItem(a: SIMD4(c.x, c.y, 0, 1), b: SIMD4(halfSize.x, halfSize.y, line, 0), color: color)
+        }
+        public static func square(_ c: SIMD2<Float>, halfSize: Float, color: SIMD4<Float>) -> OverlayItem {
+            OverlayItem(a: SIMD4(c.x, c.y, halfSize, 2), color: color)
         }
     }
 
@@ -271,7 +290,35 @@ public enum RendererShaders {
         float motion; float dither; float scanRows; float scanDir;
         float4 white;   // white-point (warmth) multipliers, linear light
         float4 scan;    // head rotation (eye frame, radians) over one scan-out
+        float4 overlay; // x: overlay shape count, y: 1 = hide the screens
     };
+    struct OverlayItem { float4 a; float4 b; float4 color; };
+
+    // World-locked overlay shapes at this surface point: linear colour and coverage.
+    float4 overlayAt(float2 sy, float pix, constant DUniforms& u, constant OverlayItem* items) {
+        float3 col = 0.0; float cov = 0.0;
+        int n = min(int(u.overlay.x), 64);
+        for (int i = 0; i < n; i++) {
+            OverlayItem it = items[i];
+            float c = 0.0;
+            if (it.a.w < 0.5) {
+                float d = length(sy - it.a.xy) - it.a.z;
+                c = 1.0 - smoothstep(-pix, pix, d);
+            } else if (it.a.w < 1.5) {
+                float2 q = abs(sy - it.a.xy) - it.b.xy;
+                float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+                c = 1.0 - smoothstep(0.5 * it.b.z - pix, 0.5 * it.b.z + pix, abs(d));
+            } else {
+                float2 q = abs(sy - it.a.xy) - it.a.z;
+                float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+                c = 1.0 - smoothstep(-pix, pix, d);
+            }
+            c *= it.color.a;
+            col = mix(col, it.color.rgb, c);
+            cov = max(cov, c);
+        }
+        return float4(col, cov);
+    }
 
     // Eye-local output pixel → point on the layout surface: (arc length, height). false = no hit.
     bool surfaceAt(float2 px, constant DUniforms& u, texture2d<float> map, sampler lin, thread float2& sy) {
@@ -427,13 +474,19 @@ public enum RendererShaders {
     fragment float4 directFragment(WOut in [[stage_in]], constant DUniforms& u [[buffer(0)]], constant DPanel* panels [[buffer(1)]],
                                    texture2d<float> map [[texture(0)]], texture2d<float> cursor [[texture(1)]],
                                    array<texture2d<float>, 8> screens [[texture(2)]],
-                                   sampler smp [[sampler(0)]], sampler lin [[sampler(1)]]) {
+                                   sampler smp [[sampler(0)]], sampler lin [[sampler(1)]],
+                                   constant OverlayItem* overlayItems [[buffer(2)]]) {
         float2 px = in.position.xy - float2(u.originX, 0.0);
         float2 sy, syx, syy;
         if (!surfaceAt(px, u, map, lin, sy)) return float4(0.0, 0.0, 0.0, 1.0);
         bool hx = surfaceAt(px + float2(1.0, 0.0), u, map, lin, syx);
         bool hy = surfaceAt(px + float2(0.0, 1.0), u, map, lin, syy);
-        int n = min(int(u.panelCount), 8);
+        float4 ov = float4(0.0);
+        if (u.overlay.x > 0.5) {
+            float pix = max(hx ? length(syx - sy) : 0.001, hy ? length(syy - sy) : 0.001);
+            ov = overlayAt(sy, pix, u, overlayItems);
+        }
+        int n = u.overlay.y > 0.5 ? 0 : min(int(u.panelCount), 8);
         for (int i = 0; i < n; i++) {
             DPanel p = panels[i];
             float2 uv = panelUV(p, sy);
@@ -500,9 +553,9 @@ public enum RendererShaders {
                 e = clamp(e + (n1 + n2 - 1.0) / 255.0, 0.0, 1.0);
                 lin = toLinear(e);
             }
-            return float4(lin, 1.0);
+            return float4(mix(lin, ov.rgb, ov.a), 1.0);
         }
-        return float4(0.0, 0.0, 0.0, 1.0);
+        return float4(ov.rgb * ov.a, 1.0);
     }
     """
 }

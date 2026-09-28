@@ -119,6 +119,11 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
 
     // Render-thread-only state.
     private var anchor = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+    /// World-locked overlay shapes from the tracking session (main thread sets, render thread reads).
+    private let overlayLock = OSAllocatedUnfairLock(uncheckedState: (items: [RendererShaders.OverlayItem](), hide: false, version: 0))
+    func setOverlay(_ items: [RendererShaders.OverlayItem], hideScreens: Bool) {
+        overlayLock.withLock { $0 = (items, hideScreens, $0.version + 1) }
+    }
     /// Frame trace: the latest measured (unpredicted) head orientation and when it was sampled.
     private var traceNow: (q: simd_quatf, t: Double)?
     private var anchorFrom = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
@@ -676,6 +681,9 @@ final class Compositor: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendabl
         }
         var renderedThisFrame = false
         renderer.presentTarget = presentAt   // lateness is measured against macOS's own schedule
+        let ov = overlayLock.withLock { $0 }
+        renderer.overlay = (ov.items, ov.hide)
+        key.append(Double(ov.version))
         if !viewMoved, key == lastDrawnKey, pendingSnapshot == nil {
             unchangedFrames += 1
         } else if let target = drawable(), renderer.render(drawable: target, eyes: eyes,

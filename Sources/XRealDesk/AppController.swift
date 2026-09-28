@@ -1036,7 +1036,12 @@ final class AppController: ObservableObject {
         session.showAim = { [weak win] p, progress, color in
             if let p { win?.hostView.showAim(at: p, progress: progress, color: color) } else { win?.hostView.hideAim() }
         }
+        let layoutNow = layout
+        session.surface = { a in layoutNow.surface(yawDegrees: a.x, pitchDegrees: a.y) }
+        session.metresPerDegree = layoutNow.distance * .pi / 180
+        session.setOverlay = { [weak compositor] items, hide in compositor?.setOverlay(items, hideScreens: hide) }
         session.onFinish = { [weak self] folder, completed in
+            self?.compositor?.setOverlay([], hideScreens: false)
             self?.calibration = nil
             self?.refreshPersonalModelStatus()
             if completed, folder != nil { self?.hud("Session saved: train your model in Settings") }
@@ -1273,8 +1278,8 @@ final class AppController: ObservableObject {
                                       gazeIndex: compositor.isRunning && !glassesOff && calibration == nil ? out.gaze : nil)
         if let cal = calibration {
             if glassesOff { cal.cancel() } else {
-                cal.tick(now: now, gaze: out.gazeIndex.map { ($0, out.gazeUV) },
-                         headPitch: SpatialMath.degrees(out.viewYawPitch.y), aim: out.aim)
+                let g = SIMD2(SpatialMath.degrees(out.viewYawPitch.x), SpatialMath.degrees(out.viewYawPitch.y))
+                cal.tick(now: now, gaze: out.tracking ? g : nil, headPitch: g.y, aim: out.aim)
             }
         }
         compositor.setCursorScreen(cursorIndex)

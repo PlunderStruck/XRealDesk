@@ -181,6 +181,29 @@ public struct ScreenLayout: Sendable, Equatable {
         return nil
     }
 
+    /// Point on the layout surface (arc length, height; untilted frame) seen at this yaw/pitch
+    /// (degrees, + = left / up), or nil if that direction misses it.
+    public func surface(yawDegrees: Float, pitchDegrees: Float) -> SIMD2<Float>? {
+        let d = SpatialMath.orientation(yaw: SpatialMath.radians(yawDegrees), pitch: SpatialMath.radians(pitchDegrees))
+            .act(SIMD3<Float>(0, 0, -1))
+        let r = radius
+        if !r.isFinite {
+            guard d.z < -1e-5 else { return nil }
+            let t = -distance / d.z
+            return SIMD2(d.x * t, d.y * t)
+        }
+        let c = r - distance
+        let a = d.x * d.x + d.z * d.z
+        guard a > 1e-8 else { return nil }
+        let b = -2 * c * d.z, k = c * c - r * r
+        let disc = b * b - 4 * a * k
+        guard disc >= 0 else { return nil }
+        let t = (-b + sqrt(disc)) / (2 * a)
+        guard t > 0 else { return nil }
+        let p = d * t
+        return SIMD2(r * atan2(p.x, c - p.z), p.y)
+    }
+
     /// Panel whose centre is angularly closest to `direction`.
     public func nearest(direction: SIMD3<Float>) -> Int? {
         let d = simd_normalize(direction)

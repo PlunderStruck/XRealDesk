@@ -70,7 +70,8 @@ func shaderChecks() {
 
     struct Scene { var layout: ScreenLayout; var yaw: Float = 0; var pitch: Float = 0; var eye = SIMD3<Float>(repeating: 0) }
     func render(_ scene: Scene, screens: [MTLTexture], lens: Bool = false, configure: (inout RendererShaders.DirectUniforms) -> Void = { _ in },
-                cursorOn: Int? = nil, pipeline: MTLRenderPipelineState? = nil) -> [SIMD4<Float>] {
+                cursorOn: Int? = nil, pipeline: MTLRenderPipelineState? = nil,
+                overlay: [RendererShaders.OverlayItem] = [], hideScreens: Bool = false) -> [SIMD4<Float>] {
         let panels = Array(scene.layout.panels.prefix(8))
         var gpuPanels = panels.map { p in
             RendererShaders.DirectPanel(arcCenter: p.arcCenter, height: p.height, width: p.size.x, panelHeight: p.size.y,
@@ -88,6 +89,8 @@ func shaderChecks() {
             lensOn: lens ? 1 : 0, originX: 0, radius: radius, distance: scene.layout.distance, cornerRadius: 0.018,
             sharpen: 0.35, quality: 2, panelCount: Float(panels.count))
         configure(&u)
+        var items = overlay.isEmpty ? [RendererShaders.OverlayItem(a: .zero, color: .zero)] : overlay
+        u.overlay = SIMD4(Float(overlay.count), hideScreens ? 1 : 0, 0, 0)
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = out; rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
         let cb = queue.makeCommandBuffer()!, enc = cb.makeRenderCommandEncoder(descriptor: rp)!
@@ -95,6 +98,7 @@ func shaderChecks() {
         enc.setFragmentSamplerState(smp, index: 0); enc.setFragmentSamplerState(lin, index: 1)
         enc.setFragmentBytes(&u, length: MemoryLayout<RendererShaders.DirectUniforms>.stride, index: 0)
         enc.setFragmentBytes(&gpuPanels, length: MemoryLayout<RendererShaders.DirectPanel>.stride * gpuPanels.count, index: 1)
+        enc.setFragmentBytes(&items, length: MemoryLayout<RendererShaders.OverlayItem>.stride * items.count, index: 2)
         enc.setFragmentTexture(map, index: 0); enc.setFragmentTexture(cursor, index: 1)
         for i in 0..<8 { enc.setFragmentTexture(i < panels.count ? screens[panels[i].index % screens.count] : dummy, index: 2 + i) }
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -113,6 +117,23 @@ func shaderChecks() {
     }
     // The image centre is the calibrated principal point, scaled to the output.
     let cx = Int(960.0 / 1920 * Double(outW)), cy = Int(547.0 / 1080 * Double(outH))
+
+    print("renderer shader: world-locked session overlay")
+    do {
+        // A green dot 10° to the left must land where 10° left appears; the screens are hidden.
+        let layout = ScreenLayout(count: 2, rows: 1, widthDegrees: 33, aspect: 16.0 / 9, gapDegrees: 1.5, curve: 0.55)
+        let focalOut = 2697 * Float(outW) / 1920
+        if let c = layout.surface(yawDegrees: 10, pitchDegrees: 0) {
+            let dot = RendererShaders.OverlayItem.circle(c, radius: 0.02, color: SIMD4(0, 1, 0, 1))
+            let px = render(Scene(layout: layout), screens: bigScreens, overlay: [dot], hideScreens: true)
+            let x = cx - Int((focalOut * tan(SpatialMath.radians(10))).rounded())
+            let at = px[cy * outW + x], centre = px[cy * outW + cx]
+            check(at.y > 0.8 && at.x < 0.2, String(format: "dot drawn where 10° left appears (green %.2f)", at.y))
+            check(centre.x + centre.y + centre.z < 0.01, "screens hidden while the session draws its own")
+        } else {
+            check(false, "10° left is on the layout surface")
+        }
+    }
 
     print("renderer shader: eye position (neck model)")
     do {

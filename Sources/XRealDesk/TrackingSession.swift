@@ -45,6 +45,11 @@ final class TrackingSession {
     // Hooks into the app.
     var showInstruction: (String?) -> Void = { _ in }
     var showAim: (SIMD2<Float>?, CGFloat, NSColor) -> Void = { _, _, _ in }
+    /// Draws world-locked shapes in the glasses (and hides the screens while `hide` is set).
+    var setOverlay: ([RendererShaders.OverlayItem], _ hide: Bool) -> Void = { _, _ in }
+    /// Viewing angle (degrees) → point on the screens' surface (metres), and metres per degree there.
+    var surface: (SIMD2<Float>) -> SIMD2<Float>? = { _ in nil }
+    var metresPerDegree: Float = 0.026
     var onFinish: (_ folder: URL?, _ completed: Bool) -> Void = { _, _ in }
     /// Test mode (`set calibrate=autopilot`): looks at every target by itself.
     var autopilot = false
@@ -78,6 +83,32 @@ final class TrackingSession {
     private var typed = ""
     private var searchGrid: (screen: Int, odd: Int, cols: Int, rows: Int, letter: Character, oddLetter: Character) = (0, 0, 7, 4, "O", "Q")
     private var onTargetTime = 0.0
+
+    /// Monitor arrangements the target levels use, drawn world-locked in the glasses (degrees):
+    /// they span far more head movement than one screen, whatever the wearer's own layout.
+    struct Frame { var centre: SIMD2<Float>; var half: SIMD2<Float> }
+    static let arrangements: [String: [Frame]] = [
+        "wide": [Frame(centre: SIMD2(16, 0), half: SIMD2(15, 8.4)), Frame(centre: SIMD2(-16, 0), half: SIMD2(15, 8.4))],
+        "ultra": [Frame(centre: SIMD2(28, 0), half: SIMD2(13, 7.3)), Frame(centre: SIMD2(0, 0), half: SIMD2(13, 7.3)),
+                  Frame(centre: SIMD2(-28, 0), half: SIMD2(13, 7.3))],
+        "stack": [Frame(centre: SIMD2(15, 9), half: SIMD2(14, 7.9)), Frame(centre: SIMD2(-15, 9), half: SIMD2(14, 7.9)),
+                  Frame(centre: SIMD2(15, -9), half: SIMD2(14, 7.9)), Frame(centre: SIMD2(-15, -9), half: SIMD2(14, 7.9))],
+        "column": [Frame(centre: SIMD2(0, 9.5), half: SIMD2(15, 8.4)), Frame(centre: SIMD2(0, -9.5), half: SIMD2(15, 8.4))],
+    ]
+    private var frames: [Frame] = []
+
+    /// Which arrangement a level uses (pop switches halfway to cover both directions).
+    private func arrangement(_ l: Level, progress: Double) -> String {
+        switch l {
+        case .glance: return "column"
+        case .pop: return progress < Double(Self.popCount) / 2 ? "wide" : "stack"
+        case .firefly: return "ultra"
+        case .search: return "stack"
+        case .shift: return "wide"
+        case .focus, .talk, .type: return ""
+        }
+    }
+    private var usesOverlay: Bool { !arrangement(level, progress: 0).isEmpty }
 
     private static let popCount = 18, glanceRounds = 6, searchRounds = 7
     private static let levelSeconds: [Level: Double] = [.focus: 25, .talk: 20, .type: 25, .firefly: 32, .shift: 22]
@@ -131,10 +162,12 @@ final class TrackingSession {
 
     /// - Parameters: gaze: where straight ahead meets a screen (index, UV); pitch: head pitch (degrees,
     ///   layout frame; down is negative); aim: where straight ahead appears in the glasses (0…1).
-    func tick(now: CFTimeInterval, gaze realGaze: (Int, SIMD2<Float>)?, headPitch: Float, aim: SIMD2<Float>) {
+    /// - Parameters: gaze: where you're looking (degrees, layout frame: yaw + = left, pitch + = up);
+    ///   aim: where straight ahead appears in the glasses (0…1).
+    func tick(now: CFTimeInterval, gaze realGaze: SIMD2<Float>?, headPitch: Float, aim: SIMD2<Float>) {
         let dt = lastTick > 0 ? min(now - lastTick, 0.1) : 0
         lastTick = now
-        var gaze = realGaze.flatMap { angle(screen: $0.0, uv: $0.1) }
+        var gaze = realGaze
         var pitch = headPitch
         if autopilot {
             gaze = phase == .ready ? startTarget : target
@@ -161,7 +194,7 @@ final class TrackingSession {
         switch level {
         case .focus, .talk, .type: return textDot
         case .firefly: return fireflyPoint(0)
-        default: return homeCentre
+        default: return SIMD2(0, 0)
         }
     }
     private var homeCentre: SIMD2<Float> { SIMD2(home.yaw, home.pitch) }
@@ -174,6 +207,7 @@ final class TrackingSession {
         guard i < Level.allCases.count else { finish(completed: true); return }
         level = Level.allCases[i]
         phase = .ready; dwell = 0; progress = 0; hitAt = nil; onTargetTime = 0
+        frames = Self.arrangements[arrangement(level, progress: 0)] ?? []
         let n = Level.allCases.count
         setText(title: "\(i + 1) of \(n)  ·  \(level.title)", detail: intro(level) + "\n\nRest the ring on the blue dot to start.", body: nil)
         showInstruction("\(level.title): rest the ring on the blue dot")
@@ -203,12 +237,12 @@ final class TrackingSession {
         switch level {
         case .focus, .talk: setText(title: level.title, detail: "", body: Self.passage)
         case .type: typed = ""; setText(title: level.title, detail: "", body: Self.sentence + "\n\n▍")
-        case .glance: glanceCount = 0; glanceDown = false; glanceStart = now; target = homeCentre
+        case .glance: glanceCount = 0; glanceDown = false; glanceStart = now; target = SIMD2(0, 0)
             setText(title: level.title, detail: "", body: nil); showInstruction("Look DOWN at your keyboard")
-        case .pop: combo = 0; target = randomTarget(awayFrom: homeCentre); setText(title: level.title, detail: "", body: nil)
+        case .pop: combo = 0; target = randomTarget(awayFrom: SIMD2(0, 0)); setText(title: level.title, detail: "", body: nil)
         case .firefly: setText(title: level.title, detail: "", body: nil)
         case .search: newGrid(); setText(title: level.title, detail: "", body: nil)
-        case .shift: target = homeCentre; setText(title: level.title, detail: "", body: nil)
+        case .shift: target = SIMD2(0, 0); setText(title: level.title, detail: "", body: nil)
         }
         if level != .glance { showInstruction(level.title) }
     }
@@ -219,7 +253,7 @@ final class TrackingSession {
         func near(_ p: SIMD2<Float>, _ tol: Float) -> Bool { gaze.map { distance($0, p) < tol } ?? false }
         switch level {
         case .focus, .talk:
-            let onText = gaze.map { g in usable.contains { s in abs(g.x - s.yaw) < s.width / 2 && abs(g.y - s.pitch) < s.height / 2 && s.index == home.index } } ?? false
+            let onText = gaze.map { g in abs(g.x - home.yaw) < home.width / 2 && abs(g.y - home.pitch) < home.height / 2 } ?? false
             if onText { progress += dt }
             draw(dots: [])
             let total = Self.levelSeconds[level]!
@@ -247,7 +281,11 @@ final class TrackingSession {
         case .pop:
             if let h = hitAt {
                 draw(dots: [(target, .done)])
-                if now - h > 0.25 { hitAt = nil; target = randomTarget(awayFrom: target) }
+                if now - h > 0.25 {
+                    hitAt = nil
+                    frames = Self.arrangements[arrangement(.pop, progress: progress)] ?? frames
+                    target = randomTarget(awayFrom: target)
+                }
             } else {
                 if near(target, 2.5) { dwell += dt } else { dwell = 0 }
                 draw(dots: [(target, .active)])
@@ -314,6 +352,7 @@ final class TrackingSession {
         }
         showAim(nil, 0, .clear)
         showInstruction(nil)
+        setOverlay([], false)
         for s in screens { s.window.orderOut(nil) }
         if let app = previousApp, app != NSRunningApplication.current { app.activate() }
         Log.info("Tracking session \(completed ? "finished" : "stopped"): \(labels.count) levels recorded, score \(score)")
@@ -355,70 +394,72 @@ final class TrackingSession {
     private func distance(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float { simd_length(a - b) }
 
     private func randomTarget(awayFrom last: SIMD2<Float>) -> SIMD2<Float> {
-        let pool = usable
+        guard !frames.isEmpty else { return SIMD2(0, 0) }
         for _ in 0..<60 {
-            let s = pool.randomElement(using: &rng)!
-            let uv = SIMD2(Float.random(in: 0.12...0.88, using: &rng), Float.random(in: 0.18...0.82, using: &rng))
-            let a = SIMD2(s.yaw - (uv.x - 0.5) * s.width, s.pitch - (uv.y - 0.5) * s.height)
+            let f = frames.randomElement(using: &rng)!
+            let a = f.centre + f.half * SIMD2(Float.random(in: -0.8...0.8, using: &rng), Float.random(in: -0.75...0.75, using: &rng))
             let d = distance(a, last)
-            if d > 8 && d < 45 { return a }
+            if d > 8 && d < 50 { return a }
         }
-        return homeCentre
+        return frames[0].centre
     }
 
-    /// Drifts across every screen, speeding up over the level.
+    /// Drifts across the whole arrangement, speeding up over the level.
     private func fireflyPoint(_ t: Double) -> SIMD2<Float> {
-        let pool = usable
-        let yaws = pool.flatMap { [$0.yaw - $0.width * 0.42, $0.yaw + $0.width * 0.42] }
-        let pitches = pool.flatMap { [$0.pitch - $0.height * 0.35, $0.pitch + $0.height * 0.35] }
-        let cy = ((yaws.min() ?? 0) + (yaws.max() ?? 0)) / 2, ay = ((yaws.max() ?? 0) - (yaws.min() ?? 0)) / 2
-        let cp = ((pitches.min() ?? 0) + (pitches.max() ?? 0)) / 2, ap = ((pitches.max() ?? 0) - (pitches.min() ?? 0)) / 2
-        // Phase grows faster over time (speed ramps from gentle to brisk).
+        let fs = Self.arrangements["ultra"]!
+        let lo = fs.map { $0.centre - $0.half * 0.85 }.reduce(SIMD2(repeating: .infinity)) { simd_min($0, $1) }
+        let hi = fs.map { $0.centre + $0.half * 0.85 }.reduce(SIMD2(repeating: -.infinity)) { simd_max($0, $1) }
+        let c = (lo + hi) / 2, amp = (hi - lo) / 2
         let phase = 2 * Double.pi * (t / 9 + t * t / 900)
-        return SIMD2(cy + ay * Float(sin(phase)), cp + ap * Float(sin(phase * 1.7 + 0.6)))
+        return SIMD2(c.x + amp.x * Float(sin(phase)), c.y + amp.y * Float(sin(phase * 1.7 + 0.6)))
     }
 
     private func newGrid() {
-        let pool = usable
-        let s = pool.randomElement(using: &rng)!
-        let pairs: [(Character, Character)] = [("O", "Q"), ("E", "F"), ("P", "R"), ("C", "G"), ("I", "l"), ("M", "N"), ("b", "d")]
-        let p = pairs.randomElement(using: &rng)!
-        searchGrid = (s.index, Int.random(in: 0..<28, using: &rng), 7, 4, p.0, p.1)
+        let pick = Int.random(in: 0..<max(frames.count, 1), using: &rng)
+        searchGrid = (pick, Int.random(in: 0..<18, using: &rng), 6, 3, "O", "Q")
     }
 
     private func gridPoint(_ k: Int) -> SIMD2<Float> {
-        guard let s = screens.first(where: { $0.index == searchGrid.screen }) else { return homeCentre }
+        guard searchGrid.screen < frames.count else { return SIMD2(0, 0) }
+        let f = frames[searchGrid.screen]
         let c = k % searchGrid.cols, r = k / searchGrid.cols
-        let uv = SIMD2(0.14 + Float(c) * 0.72 / Float(searchGrid.cols - 1), 0.25 + Float(r) * 0.5 / Float(searchGrid.rows - 1))
-        return SIMD2(s.yaw - (uv.x - 0.5) * s.width, s.pitch - (uv.y - 0.5) * s.height)
+        let x = -0.75 + Float(c) * 1.5 / Float(searchGrid.cols - 1), y = 0.6 - Float(r) * 1.2 / Float(searchGrid.rows - 1)
+        return f.centre + f.half * SIMD2(x, y)
     }
 
     // MARK: Drawing
 
     private func draw(dots: [(SIMD2<Float>, SessionView.DotState)]) {
-        for s in screens where s.visible {
-            let mine = dots.compactMap { d -> (SIMD2<Float>, SessionView.DotState)? in
-                guard let (ps, uv) = place(d.0), ps.index == s.index else { return nil }
-                return (uv, d.1)
+        guard usesOverlay || phase == .ready && !dots.isEmpty else { setOverlay([], false); return }
+        var items: [RendererShaders.OverlayItem] = []
+        let m = metresPerDegree
+        if usesOverlay {
+            for f in frames {
+                if let c = surface(f.centre) {
+                    items.append(.frame(c, halfSize: f.half * m, line: 0.15 * m, color: SIMD4(0.22, 0.28, 0.42, 1)))
+                }
             }
-            s.window.view.show(dots: mine, grid: nil, score: score)
         }
+        for (a, state) in dots {
+            guard let c = surface(a) else { continue }
+            let fill: SIMD4<Float> = state == .done ? SIMD4(0.10, 0.75, 0.25, 1) : state == .active ? SIMD4(0.05, 0.35, 1, 1) : SIMD4(0.3, 0.3, 0.3, 1)
+            items.append(.circle(c, radius: 0.95 * m, color: SIMD4(1, 1, 1, 1)))
+            items.append(.circle(c, radius: 0.78 * m, color: fill))
+        }
+        setOverlay(items, usesOverlay)
+        if !usesOverlay { for s in screens where s.visible { s.window.view.show(dots: [], grid: nil, score: score) } }
     }
 
     private func drawGrid() {
-        for s in screens where s.visible {
-            if s.index == searchGrid.screen {
-                var cells: [(SIMD2<Float>, Character)] = []
-                for k in 0..<(searchGrid.cols * searchGrid.rows) {
-                    let c = k % searchGrid.cols, r = k / searchGrid.cols
-                    let uv = SIMD2(0.14 + Float(c) * 0.72 / Float(searchGrid.cols - 1), 0.25 + Float(r) * 0.5 / Float(searchGrid.rows - 1))
-                    cells.append((uv, k == searchGrid.odd ? searchGrid.oddLetter : searchGrid.letter))
-                }
-                s.window.view.show(dots: [], grid: cells, score: score)
-            } else {
-                s.window.view.show(dots: [], grid: nil, score: score)
-            }
+        var items: [RendererShaders.OverlayItem] = []
+        let m = metresPerDegree
+        for f in frames { if let c = surface(f.centre) { items.append(.frame(c, halfSize: f.half * m, line: 0.15 * m, color: SIMD4(0.22, 0.28, 0.42, 1))) } }
+        for k in 0..<(searchGrid.cols * searchGrid.rows) {
+            guard let c = surface(gridPoint(k)) else { continue }
+            let col = SIMD4<Float>(0.85, 0.85, 0.9, 1)
+            items.append(k == searchGrid.odd ? .square(c, halfSize: 0.62 * m, color: col) : .circle(c, radius: 0.7 * m, color: col))
         }
+        setOverlay(items, true)
     }
 
     private func setText(title: String, detail: String, body: String?) {
