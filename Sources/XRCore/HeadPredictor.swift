@@ -92,29 +92,45 @@ public struct HeadPredictor: Sendable {
         case hybrid = 3
     }
 
-    /// The parts of the predictor that keep learning from the wearer (OnlineLearner): the still-head
-    /// linear fit and the neural net's output layer. Starts as the shipped fit; swapped atomically.
-    public struct Learned: Sendable {
-        public var still: [[SIMD3<Float>]]
-        public var netW3: [Float]
-        public var netB3: [Float]
-        public init(still: [[SIMD3<Float>]], netW3: [Float], netB3: [Float]) {
-            self.still = still; self.netW3 = netW3; self.netB3 = netB3
+    /// A small neural net: standardise the 39 features, two tanh layers, a linear output with the
+    /// rotation (degrees) at every horizon. Weights row-major [in][out].
+    public struct Net: Sendable, Codable {
+        public var sizes: [Int]
+        public var mean: [Float], scale: [Float]
+        public var w1: [Float], b1: [Float], w2: [Float], b2: [Float], w3: [Float], b3: [Float]
+        public init(sizes: [Int], mean: [Float], scale: [Float], w1: [Float], b1: [Float], w2: [Float], b2: [Float], w3: [Float], b3: [Float]) {
+            self.sizes = sizes; self.mean = mean; self.scale = scale
+            self.w1 = w1; self.b1 = b1; self.w2 = w2; self.b2 = b2; self.w3 = w3; self.b3 = b3
         }
         public var isUsable: Bool {
-            still.count == horizonsMs.count && still.allSatisfy { $0.count == featureCount }
-                && netW3.count == netW3Size && netB3.count == netSizes.last
-                && still.allSatisfy { $0.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite } }
-                && netW3.allSatisfy(\.isFinite) && netB3.allSatisfy(\.isFinite)
+            sizes.count == 4 && sizes[0] == featureCount && sizes[3] == 3 * horizonsMs.count
+                && mean.count == sizes[0] && scale.count == sizes[0]
+                && w1.count == sizes[0] * sizes[1] && b1.count == sizes[1]
+                && w2.count == sizes[1] * sizes[2] && b2.count == sizes[2]
+                && w3.count == sizes[2] * sizes[3] && b3.count == sizes[3]
+                && [mean, scale, w1, b1, w2, b2, w3, b3].allSatisfy { $0.allSatisfy(\.isFinite) }
         }
     }
-    static var netW3Size: Int { netSizes.count == 4 ? netSizes[2] * netSizes[3] : 0 }
-    public static let shipped = Learned(still: weightsStill, netW3: netW3, netB3: netB3)
-    private static let learnedLock = OSAllocatedUnfairLock(initialState: shipped)
-    /// What the hybrid model predicts with right now (thread-safe). Unusable values are refused.
-    public static var learned: Learned {
-        get { learnedLock.withLock { $0 } }
-        set { if newValue.isUsable { learnedLock.withLock { $0 = newValue } } }
+
+    /// Everything the hybrid predictor uses: the still-head linear fit and the net. Starts as the
+    /// shipped model; a personal model (trained from the wearer's own session) can replace it.
+    public struct Personal: Sendable {
+        public var still: [[SIMD3<Float>]]
+        public var net: Net
+        public init(still: [[SIMD3<Float>]], net: Net) { self.still = still; self.net = net }
+        public var isUsable: Bool {
+            still.count == horizonsMs.count && still.allSatisfy { $0.count == featureCount }
+                && still.allSatisfy { $0.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite } } && net.isUsable
+        }
+    }
+    public static let shippedNet = Net(sizes: netSizes, mean: netMean, scale: netScale, w1: netW1, b1: netB1,
+                                       w2: netW2, b2: netB2, w3: netW3, b3: netB3)
+    public static let shipped = Personal(still: weightsStill, net: shippedNet)
+    private static let modelLock = OSAllocatedUnfairLock(initialState: shipped)
+    /// What the hybrid predictor uses right now (thread-safe). Unusable models are refused.
+    public static var current: Personal {
+        get { modelLock.withLock { $0 } }
+        set { if newValue.isUsable { modelLock.withLock { $0 = newValue } } }
     }
 
     /// Head speed (°/s) over which the neural net takes over from the still-head fit (hybrid).
@@ -135,13 +151,7 @@ public struct HeadPredictor: Sendable {
         case .previous:
             return rotation(f, seconds: seconds, weights: weightsPrevious)
         case .hybrid:
-            let p = learned
-            let (lo, hi) = hybridDegreesPerSecond
-            let x = min(max((speed(f) - lo) / max(hi - lo, 1e-3), 0), 1)
-            let t = x * x * (3 - 2 * x)
-            let still = rotation(f, seconds: seconds, weights: p.still)
-            guard t > 0, let h = netHidden(f), let net = netRotation(hidden: h, seconds: seconds, w3: p.netW3, b3: p.netB3) else { return still }
-            return still * (1 - t) + net * t
+            return hybridRotation(f, seconds: seconds, model: current)
         case .blended:
             let (lo, hi) = blendDegreesPerSecond
             let x = min(max((speed(f) - lo) / max(hi - lo, 1e-3), 0), 1)
@@ -153,13 +163,23 @@ public struct HeadPredictor: Sendable {
         }
     }
 
+    /// The hybrid prediction with a given model (the shipped one or a personal one).
+    public static func hybridRotation(_ f: Features, seconds: Double, model p: Personal) -> SIMD3<Float> {
+        let (lo, hi) = hybridDegreesPerSecond
+        let x = min(max((speed(f) - lo) / max(hi - lo, 1e-3), 0), 1)
+        let t = x * x * (3 - 2 * x)
+        let still = rotation(f, seconds: seconds, weights: p.still)
+        guard t > 0, let h = netHidden(f, net: p.net),
+              let net = netRotation(hidden: h, seconds: seconds, w3: p.net.w3, b3: p.net.b3) else { return still }
+        return still * (1 - t) + net * t
+    }
+
     /// The neural net's last hidden layer for these features (what its output layer reads).
-    public static func netHidden(_ f: Features) -> [Float]? {
-        let sizes = netSizes
-        guard sizes.count == 4, sizes[0] == featureCount,
-              netW1.count == sizes[0] * sizes[1], netW2.count == sizes[1] * sizes[2] else { return nil }
+    public static func netHidden(_ f: Features, net: Net) -> [Float]? {
+        let sizes = net.sizes
+        guard net.isUsable else { return nil }
         var x = [Float](repeating: 0, count: sizes[0])
-        for i in 0..<sizes[0] { x[i] = (f.values[i] - netMean[i]) / max(netScale[i], 1e-12) }
+        for i in 0..<sizes[0] { x[i] = (f.values[i] - net.mean[i]) / max(net.scale[i], 1e-12) }
         func layer(_ input: [Float], _ w: [Float], _ b: [Float], _ n: Int, tanh apply: Bool) -> [Float] {
             var out = b
             for i in 0..<input.count {
@@ -171,8 +191,8 @@ public struct HeadPredictor: Sendable {
             if apply { for j in 0..<n { out[j] = tanhf(out[j]) } }
             return out
         }
-        let h1 = layer(x, netW1, netB1, sizes[1], tanh: true)
-        return layer(h1, netW2, netB2, sizes[2], tanh: true)
+        let h1 = layer(x, net.w1, net.b1, sizes[1], tanh: true)
+        return layer(h1, net.w2, net.b2, sizes[2], tanh: true)
     }
 
     /// All net outputs (degrees; 3 per horizon) from the last hidden layer and an output layer.

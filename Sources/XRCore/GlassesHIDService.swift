@@ -166,8 +166,7 @@ public final class GlassesHIDService: @unchecked Sendable {
     }
     private let learnedLock = OSAllocatedUnfairLock<HeadPredictor.Model?>(initialState: .hybrid)
     private var headPredictor = HeadPredictor()
-    /// Keeps improving the hybrid predictor from the wearer's head motion (enabled by the app).
-    public let learner = OnlineLearner()
+
     private var steadyApplied = true
 
     public func recordIMU(to url: URL, seconds rawSeconds: Double) {
@@ -517,7 +516,6 @@ public final class GlassesHIDService: @unchecked Sendable {
         pose.learned = model != nil
         pose.learnedModel = model ?? .blended
         pose.features = headPredictor.features
-        if model == .hybrid { learner.add(t: sampleTime, features: pose.features, orientation: filter.presented) }
         let latest = pose
         poseLock.withLock { $0 = latest }
 

@@ -244,11 +244,6 @@ struct SettingsView: View {
                 Button("Calibrate tracking…") { app.startCalibration() }
                 Text("About 4 minutes of short guided tasks in the glasses (hold still, talk, type, follow a dot) plus a quick timing check. It records how your head moves so tracking can be tuned to you. Esc stops it at any time.")
                     .font(.caption).foregroundStyle(.secondary)
-                Toggle("Keep improving tracking", isOn: $settings.keepImprovingTracking)
-                LearningStatusText(live: app.live)
-                Text("While you wear the glasses, head tracking keeps learning how your head moves and adopts an improvement only when it measurably steadies the screens. Nothing is recorded or sent anywhere. Turn it off to keep what it has learned as is.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("Reset learned tracking") { app.resetLearnedTracking() }
             }
             Section {
                 DisclosureGroup("Advanced tuning") {
@@ -331,12 +326,3 @@ struct SettingsView: View {
     }
 }
 
-/// "Learned from N min of your head motion · K improvements" (updates live).
-private struct LearningStatusText: View {
-    @ObservedObject var live: LiveState
-    var body: some View {
-        if !live.learningStatus.isEmpty {
-            Text(live.learningStatus).font(.caption).foregroundStyle(.secondary)
-        }
-    }
-}

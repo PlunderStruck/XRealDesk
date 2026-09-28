@@ -15,8 +15,6 @@ final class LiveState: ObservableObject {
     /// Head yaw/pitch relative to the layout, radians.
     @Published var viewYawPitch = SIMD2<Float>(0, 0)
     @Published var renderFPS: Double = 0
-    /// What tracking has learned from the wearer (Settings > Tracking).
-    @Published var learningStatus = ""
     @Published var imuRate: Double = 0
     /// The glasses are in their side-by-side 3D mode (button), running at 60 Hz.
     @Published var sideBySide = false
@@ -98,10 +96,7 @@ final class AppController: ObservableObject {
     /// screen showed its content up to 0.1 s old, then snapped to current (a hop); in a blind A/B
     /// the user preferred full rate everywhere, and dropped frames didn't change.
     private var captureThrottle = false
-    private var learningOn = false
 
-    /// Forget what tracking has learned from the wearer and use the shipped fit again.
-    func resetLearnedTracking() { hid.learner.reset() }
     private var blindMapping: [HeadPredictor.Model] = []
     private var blindIndex = 0
     /// Scan-out compensation strength (`set scanscale=0.4`; see Compositor.Config.scanScale).
@@ -147,20 +142,10 @@ final class AppController: ObservableObject {
         Log.info("XRealDesk starting (preview: \(preview)) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
         hid.logger = { Log.info("[glasses] \($0)") }
         hid.onStateChange = { [weak self] state in self?.glassesStateChanged(state) }
-        hid.learner.log = { Log.info($0) }
-        hid.learner.onImproved = { [weak self] gain in
-            DispatchQueue.main.async {
-                guard let self, self.settings.showHUD else { return }
-                self.window?.hostView.showHUD(String(format: "Tracking improved: %.0f%% steadier while moving", gain * 100), seconds: 3)
-            }
-        }
         hid.onDeviceInfo = { [weak self] info in
             self?.deviceInfo = info
             if let serial = info?.serial {
                 self?.restoreRotation(for: serial)
-                let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                    .appendingPathComponent("XRealDesk", isDirectory: true)
-                self?.hid.learner.attach(serial: serial, directory: dir)
             }
         }
         hid.onButton = { phys, virt, value in Log.info("Glasses button phys=\(phys) virt=\(virt) value=\(value)") }
@@ -1237,15 +1222,6 @@ final class AppController: ObservableObject {
         let capturing = captures.filter { $0.status == .running }.count
         if capturing != capturingCount { capturingCount = capturing }
         updateTrackingHealth(tracking: out.tracking)
-        // Learn from head motion only while the glasses are worn, tracking and not calibrating.
-        let learn = settings.keepImprovingTracking && !glassesOff && out.tracking && compositor.isRunning && calibration == nil
-        if learn != learningOn { learningOn = learn; hid.learner.enabled = learn }
-        if tickCount % 60 == 0 {
-            let st = hid.learner.status
-            let text = st.minutesLearned < 0.5 ? "Learning from your head motion…" :
-                String(format: "Learned from %.0f min of your head motion · %d improvement%@", st.minutesLearned, st.adoptions, st.adoptions == 1 ? "" : "s")
-            if live.learningStatus != text { live.learningStatus = text }
-        }
 
         // Keyboard focus follows your eyes, but only once you've settled on the screen (0.5 s) and
         // aren't mid-typing (1 s since the last key), so a glance never steals your keystrokes.
