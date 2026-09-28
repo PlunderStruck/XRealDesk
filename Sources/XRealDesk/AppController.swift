@@ -1040,6 +1040,10 @@ final class AppController: ObservableObject {
         session.surface = { a in layoutNow.surface(yawDegrees: a.x, pitchDegrees: a.y) }
         session.metresPerDegree = layoutNow.distance * .pi / 180
         session.setOverlay = { [weak compositor] items, hide in compositor?.setOverlay(items, hideScreens: hide) }
+        session.showProgress = { [weak win] fraction, text in win?.hostView.showProgress(fraction, text: text) }
+        session.onTrainRequested = { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.trainPersonalModel() }
+        }
         session.onFinish = { [weak self] folder, completed in
             self?.compositor?.setOverlay([], hideScreens: false)
             self?.calibration = nil

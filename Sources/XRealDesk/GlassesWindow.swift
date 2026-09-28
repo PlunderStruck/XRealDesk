@@ -121,6 +121,36 @@ final class MetalHostView: NSView {
         CATransaction.commit()
     }
 
+    // MARK: Session progress (head-locked bar near the bottom)
+
+    private let progressTrack = CALayer(), progressFill = CALayer(), progressText = CATextLayer()
+    private var progressConfigured = false
+
+    /// `fraction` nil hides the bar.
+    func showProgress(_ fraction: Double?, text: String) {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard let fraction else { [progressTrack, progressFill, progressText].forEach { $0.removeFromSuperlayer() }; return }
+        if !progressConfigured {
+            progressConfigured = true
+            progressTrack.backgroundColor = NSColor(white: 1, alpha: 0.18).cgColor
+            progressTrack.cornerRadius = 3
+            progressFill.backgroundColor = NSColor.systemGreen.cgColor
+            progressFill.cornerRadius = 3
+            progressText.fontSize = 16; progressText.font = NSFont.systemFont(ofSize: 16, weight: .medium)
+            progressText.foregroundColor = NSColor(white: 1, alpha: 0.85).cgColor
+            progressText.alignmentMode = .center
+        }
+        for l in [progressTrack, progressFill, progressText] where l.superlayer == nil { layer?.addSublayer(l) }
+        let eyeWidth = bounds.width / (isSideBySide ? 2 : 1)
+        let w = eyeWidth * 0.42, x = (eyeWidth - w) / 2, y = bounds.height * 0.1
+        progressTrack.frame = CGRect(x: x, y: y, width: w, height: 6)
+        progressFill.frame = CGRect(x: x, y: y, width: w * CGFloat(min(max(fraction, 0), 1)), height: 6)
+        progressText.contentsScale = window?.backingScaleFactor ?? 2
+        progressText.string = text
+        progressText.frame = CGRect(x: x - 40, y: y + 10, width: w + 80, height: 22)
+    }
+
     func hideAim() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)

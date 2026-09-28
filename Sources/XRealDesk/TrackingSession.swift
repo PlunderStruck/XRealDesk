@@ -3,7 +3,7 @@ import QuartzCore
 import simd
 import XRCore
 
-/// A guided tracking session: ~8 minutes of short "levels" across all glasses screens that produce
+/// A guided tracking session: one ~14-minute take of game "levels" that produce
 /// the head motion a personal tracking model learns from (reading, talking, typing, glancing down at
 /// the keyboard, popping bubbles on every screen, following a firefly, searching a grid, leaning).
 /// Everything is recorded as one take (imu.csv) with a label per level (labels.csv).
@@ -23,7 +23,7 @@ final class TrackingSession {
     }
 
     enum Level: CaseIterable {
-        case focus, talk, type, glance, pop, firefly, search, shift
+        case focus, talk, type, glance, pop, firefly, search, shift, finale
         var label: String { "\(self)" }
         var title: String {
             switch self {
@@ -33,14 +33,21 @@ final class TrackingSession {
             case .glance: return "Glance: keyboard and back"
             case .pop: return "Pop: look at each bubble"
             case .firefly: return "Firefly: follow it"
-            case .search: return "Search: find the odd letter"
+            case .search: return "Search: find the square"
             case .shift: return "Shift: lean while you watch the dot"
+            case .finale: return "Encore: everything, faster"
             }
         }
     }
 
-    static let passage = "The glasses measure your head a thousand times a second. To keep these screens perfectly still, the app has to guess where your head will be about forty milliseconds from now, the time a picture takes to reach your eyes. Everyone's head moves a little differently: how you settle after a turn, how you sway while you read, how typing jolts you. This session records exactly that, so a model can be trained on how you move."
-    static let sentence = "The quick brown fox jumps over the lazy dog while five wizards box quickly."
+    static let passage = """
+    The glasses measure your head a thousand times a second. To keep these screens perfectly still, the app has to guess where your head will be about forty milliseconds from now, the time a picture takes to reach your eyes. Everyone's head moves a little differently: how you settle after a turn, how you sway while you read, how typing jolts you. This session records exactly that, so a model can learn how you move.
+
+    Read on at your own pace. Nothing here is a test of reading: the point is simply to look the way you normally look while you read. Your eyes jump along each line and back to the start of the next; your head follows a little, and settles. Your pulse moves it too, by a hair, about once a second. When you talk, your jaw rocks the glasses gently. Each of these movements is tiny, but the screens have to cancel all of them, which is why they're worth learning. When you reach the end, start again from the top.
+    """
+    static let sentences = ["The quick brown fox jumps over the lazy dog.", "Five wizards box quickly while jumping frogs vex the judge.",
+                            "Pack my box with five dozen liquor jugs.", "How vexingly quick daft zebras jump over logs.",
+                            "Sphinx of black quartz, judge my vow and type it twice."]
 
     // Hooks into the app.
     var showInstruction: (String?) -> Void = { _ in }
@@ -51,6 +58,10 @@ final class TrackingSession {
     var surface: (SIMD2<Float>) -> SIMD2<Float>? = { _ in nil }
     var metresPerDegree: Float = 0.026
     var onFinish: (_ folder: URL?, _ completed: Bool) -> Void = { _, _ in }
+    /// Head-locked progress in the glasses: overall fraction and "about N min left".
+    var showProgress: (Double?, String) -> Void = { _, _ in }
+    /// T at the end: train a model from this session right away.
+    var onTrainRequested: () -> Void = {}
     /// Test mode (`set calibrate=autopilot`): looks at every target by itself.
     var autopilot = false
 
@@ -59,7 +70,7 @@ final class TrackingSession {
     private let folder: URL
     private var level: Level = .focus
     private var levelIndex = 0
-    private enum Phase { case ready, running, done }
+    private enum Phase { case ready, running, done, summary }
     private var phase = Phase.ready
     private var dwell = 0.0
     private var progress = 0.0
@@ -81,6 +92,9 @@ final class TrackingSession {
     private var glanceCount = 0
     private var glanceStart: CFTimeInterval = 0
     private var typed = ""
+    private var sentenceIndex = 0
+    private var finaleSegment = -1
+    private var summaryAt: CFTimeInterval = 0
     private var searchGrid: (screen: Int, odd: Int, cols: Int, rows: Int, letter: Character, oddLetter: Character) = (0, 0, 7, 4, "O", "Q")
     private var onTargetTime = 0.0
 
@@ -97,21 +111,29 @@ final class TrackingSession {
     ]
     private var frames: [Frame] = []
 
-    /// Which arrangement a level uses (pop switches halfway to cover both directions).
-    private func arrangement(_ l: Level, progress: Double) -> String {
+    static let arrangementCycle = ["wide", "stack", "ultra", "column"]
+
+    /// Which arrangement a level uses; `step` is the level's own counter (bubbles popped, rounds
+    /// found, seconds elapsed or encore segment), so arrangements rotate within a level.
+    private func arrangement(_ l: Level, progress step: Double) -> String {
         switch l {
         case .glance: return "column"
-        case .pop: return progress < Double(Self.popCount) / 2 ? "wide" : "stack"
-        case .firefly: return "ultra"
-        case .search: return "stack"
+        case .pop: return Self.arrangementCycle[min(3, Int(step / 11))]
+        case .firefly: return step < 45 ? "ultra" : "stack"
+        case .search: return Int(step) % 2 == 0 ? "stack" : "ultra"
         case .shift: return "wide"
+        case .finale: return Self.arrangementCycle[Int(step) % 4]
         case .focus, .talk, .type: return ""
         }
     }
     private var usesOverlay: Bool { !arrangement(level, progress: 0).isEmpty }
 
-    private static let popCount = 18, glanceRounds = 6, searchRounds = 7
-    private static let levelSeconds: [Level: Double] = [.focus: 25, .talk: 20, .type: 25, .firefly: 32, .shift: 22]
+    private static let popCount = 44, glanceRounds = 10, searchRounds = 15
+    private static let levelSeconds: [Level: Double] = [.focus: 60, .talk: 60, .type: 75, .firefly: 90, .shift: 45, .finale: 180]
+    /// Rough length of each level (incl. getting ready), for the progress bar and time left.
+    private static let estimate: [Level: Double] = [.focus: 64, .talk: 64, .type: 79, .glance: 65, .pop: 118, .firefly: 94,
+                                                    .search: 95, .shift: 49, .finale: 184]
+    private static var totalEstimate: Double { Level.allCases.reduce(0) { $0 + (estimate[$1] ?? 60) } }
 
     init(screens: [Screen], hid: GlassesHIDService) {
         self.screens = screens
@@ -160,8 +182,6 @@ final class TrackingSession {
 
     // MARK: Tick (60 Hz)
 
-    /// - Parameters: gaze: where straight ahead meets a screen (index, UV); pitch: head pitch (degrees,
-    ///   layout frame; down is negative); aim: where straight ahead appears in the glasses (0…1).
     /// - Parameters: gaze: where you're looking (degrees, layout frame: yaw + = left, pitch + = up);
     ///   aim: where straight ahead appears in the glasses (0…1).
     func tick(now: CFTimeInterval, gaze realGaze: SIMD2<Float>?, headPitch: Float, aim: SIMD2<Float>) {
@@ -187,6 +207,39 @@ final class TrackingSession {
         case .done:
             showAim(aim, 1, .systemGreen)
             if now - doneAt > 1.2 { enter(levelIndex + 1) }
+        case .summary:
+            if now - summaryAt > 10 { finish(completed: true); return }
+        }
+        updateProgress(now)
+    }
+
+    /// Overall progress and time left, from each level's rough length.
+    private func updateProgress(_ now: CFTimeInterval) {
+        guard phase != .summary else { return }
+        let levels = Level.allCases
+        var done = 0.0
+        for l in levels.prefix(levelIndex) { done += Self.estimate[l] ?? 60 }
+        let here = Self.estimate[level] ?? 60
+        let fraction: Double
+        switch phase {
+        case .ready: fraction = 0
+        case .running: fraction = min(levelFraction(now), 1)
+        default: fraction = 1
+        }
+        let total = Self.totalEstimate
+        let elapsed = done + fraction * here
+        let left = max(0, total - elapsed)
+        let text = left > 90 ? String(format: "about %.0f min left", (left / 60).rounded()) : left > 20 ? "about a minute left" : "almost done"
+        showProgress(elapsed / total, "Level \(levelIndex + 1) of \(levels.count)  ·  \(text)  ·  \(score) pts")
+    }
+
+    private func levelFraction(_ now: CFTimeInterval) -> Double {
+        switch level {
+        case .glance: return Double(glanceCount) / Double(Self.glanceRounds)
+        case .pop: return progress / Double(Self.popCount)
+        case .search: return progress / Double(Self.searchRounds)
+        case .focus, .talk, .type: return progress / (Self.levelSeconds[level] ?? 60)
+        default: return (now - levelStart) / (Self.levelSeconds[level] ?? 60)
         }
     }
 
@@ -204,7 +257,7 @@ final class TrackingSession {
 
     private func enter(_ i: Int) {
         levelIndex = i
-        guard i < Level.allCases.count else { finish(completed: true); return }
+        guard i < Level.allCases.count else { showSummary(); return }
         level = Level.allCases[i]
         phase = .ready; dwell = 0; progress = 0; hitAt = nil; onTargetTime = 0
         frames = Self.arrangements[arrangement(level, progress: 0)] ?? []
@@ -221,8 +274,9 @@ final class TrackingSession {
         case .glance: return "When asked, look down at your keyboard, then back at the dot. As fast as is comfortable."
         case .pop: return "Bubbles appear on all your screens. Look at each one to pop it. Quick pops build a combo."
         case .firefly: return "Follow the firefly with your eyes and head as it drifts across your screens. It speeds up."
-        case .search: return "Find the one letter that's different and look at it."
+        case .search: return "Among the circles there's one square. Find it and look at it."
         case .shift: return "Keep your eyes on the dot while you lean back, lean forward and shift in your chair."
+        case .finale: return "Bubbles and fireflies take turns in every arrangement, faster and faster. Points count double."
         }
     }
 
@@ -236,13 +290,14 @@ final class TrackingSession {
         Self.sound("Tink")
         switch level {
         case .focus, .talk: setText(title: level.title, detail: "", body: Self.passage)
-        case .type: typed = ""; setText(title: level.title, detail: "", body: Self.sentence + "\n\n▍")
+        case .type: typed = ""; sentenceIndex = 0; showTyping()
         case .glance: glanceCount = 0; glanceDown = false; glanceStart = now; target = SIMD2(0, 0)
             setText(title: level.title, detail: "", body: nil); showInstruction("Look DOWN at your keyboard")
         case .pop: combo = 0; target = randomTarget(awayFrom: SIMD2(0, 0)); setText(title: level.title, detail: "", body: nil)
         case .firefly: setText(title: level.title, detail: "", body: nil)
         case .search: newGrid(); setText(title: level.title, detail: "", body: nil)
         case .shift: target = SIMD2(0, 0); setText(title: level.title, detail: "", body: nil)
+        case .finale: finaleSegment = -1; combo = 0; setText(title: level.title, detail: "", body: nil)
         }
         if level != .glance { showInstruction(level.title) }
     }
@@ -279,28 +334,36 @@ final class TrackingSession {
             showAim(aim, CGFloat(Double(glanceCount) / Double(Self.glanceRounds)), .systemGreen)
             return Double(glanceCount) / Double(Self.glanceRounds)
         case .pop:
-            if let h = hitAt {
-                draw(dots: [(target, .done)])
-                if now - h > 0.25 {
-                    hitAt = nil
-                    frames = Self.arrangements[arrangement(.pop, progress: progress)] ?? frames
-                    target = randomTarget(awayFrom: target)
-                }
-            } else {
-                if near(target, 2.5) { dwell += dt } else { dwell = 0 }
-                draw(dots: [(target, .active)])
-                if dwell >= 0.25 {
-                    dwell = 0; hitAt = now; progress += 1
-                    combo = now - lastHitAt < 1.6 ? combo + 1 : 1
-                    lastHitAt = now
-                    score += 100 * combo
-                    Self.sound(combo >= 3 ? "Glass" : "Pop")
-                    showInstruction(combo >= 2 ? "Combo ×\(combo)" : "Pop!")
-                }
+            if popStep(now: now, dt: dt, near: near, multiplier: 1, dwellNeeded: 0.25) {
+                frames = Self.arrangements[arrangement(.pop, progress: progress)] ?? frames
             }
             showAim(aim, CGFloat(progress / Double(Self.popCount)), .systemGreen)
             return progress / Double(Self.popCount)
+        case .finale:
+            let segment = Int(t / 20)
+            if segment != finaleSegment {
+                finaleSegment = segment
+                frames = Self.arrangements[arrangement(.finale, progress: Double(segment))] ?? frames
+                target = randomTarget(awayFrom: target); hitAt = nil; dwell = 0
+                Self.sound("Purr")
+                showInstruction(segment % 2 == 0 ? "Pop them, fast! ×2" : "Follow the firefly! ×2")
+            }
+            if segment % 2 == 0 {
+                _ = popStep(now: now, dt: dt, near: near, multiplier: 2, dwellNeeded: 0.2)
+            } else {
+                target = fireflyPoint(t * (1.2 + Double(segment) * 0.08))
+                let on = near(target, 3.5)
+                if on { score += Int(dt * 120) }
+                draw(dots: [(target, on ? .done : .active)])
+            }
+            let total = Self.levelSeconds[.finale]!
+            showAim(aim, CGFloat(t / total), .systemGreen)
+            return t / total
         case .firefly:
+            let wanted = arrangement(.firefly, progress: t)
+            if let f = Self.arrangements[wanted], f.count != frames.count || f.first?.centre != frames.first?.centre {
+                frames = f; Self.sound("Purr"); showInstruction("It's moving to a new arrangement")
+            }
             target = fireflyPoint(t)
             let on = near(target, 3.5)
             if on { onTargetTime += dt; score += Int(dt * 60) }
@@ -315,7 +378,10 @@ final class TrackingSession {
             if dwell >= 0.4 {
                 dwell = 0; progress += 1; score += 250
                 Self.sound("Pop")
-                if progress < Double(Self.searchRounds) { newGrid() }
+                if progress < Double(Self.searchRounds) {
+                    frames = Self.arrangements[arrangement(.search, progress: progress)] ?? frames
+                    newGrid()
+                }
             }
             showAim(aim, CGFloat(progress / Double(Self.searchRounds)), .systemGreen)
             return progress / Double(Self.searchRounds)
@@ -328,6 +394,43 @@ final class TrackingSession {
             showAim(aim, CGFloat(t / total), .systemGreen)
             return t / total
         }
+    }
+
+    /// One tick of popping; returns true when a bubble was just popped (a new one follows shortly).
+    private func popStep(now: CFTimeInterval, dt: Double, near: (SIMD2<Float>, Float) -> Bool, multiplier: Int, dwellNeeded: Double) -> Bool {
+        if let h = hitAt {
+            draw(dots: [(target, .done)])
+            if now - h > 0.25 { hitAt = nil; target = randomTarget(awayFrom: target) }
+            return false
+        }
+        if near(target, 2.5) { dwell += dt } else { dwell = 0 }
+        draw(dots: [(target, .active)])
+        guard dwell >= dwellNeeded else { return false }
+        dwell = 0; hitAt = now; progress += 1
+        combo = now - lastHitAt < 1.6 ? combo + 1 : 1
+        lastHitAt = now
+        score += 100 * combo * multiplier
+        Self.sound(combo >= 3 ? "Glass" : "Pop")
+        showInstruction(combo >= 2 ? "Combo ×\(combo)" : "Pop!")
+        return true
+    }
+
+    private func showTyping() {
+        let s = Self.sentences[sentenceIndex % Self.sentences.count]
+        setText(title: level.title, detail: "", body: s + "\n\n" + typed + "▍")
+    }
+
+    /// End of the session: the score, and T to train right away (otherwise it closes by itself).
+    private func showSummary() {
+        phase = .summary
+        summaryAt = CACurrentMediaTime()
+        setOverlay([], false)
+        showProgress(1, "Session complete  ·  \(score) pts")
+        Self.sound("Hero")
+        setText(title: "Session complete  ·  \(score) points",
+                detail: "Press T to train your tracking model now, or do it later in Settings. Any other key closes this.",
+                body: nil)
+        showInstruction("Done! \(score) pts  ·  press T to train your model now")
     }
 
     private func complete(_ now: CFTimeInterval) {
@@ -352,6 +455,7 @@ final class TrackingSession {
         }
         showAim(nil, 0, .clear)
         showInstruction(nil)
+        showProgress(nil, "")
         setOverlay([], false)
         for s in screens { s.window.orderOut(nil) }
         if let app = previousApp, app != NSRunningApplication.current { app.activate() }
@@ -365,10 +469,19 @@ final class TrackingSession {
         let now = CACurrentMediaTime()
         lastKeyAt = now
         if e.keyCode == 53 { cancel(); return }                       // Esc
+        if phase == .summary {
+            let train = e.charactersIgnoringModifiers?.lowercased() == "t"
+            finish(completed: true)
+            if train { onTrainRequested() }
+            return
+        }
         if level == .type, phase == .running {
             if e.keyCode == 51 { if !typed.isEmpty { typed.removeLast() } }   // delete
+            else if e.keyCode == 36 || e.keyCode == 76 { typed = ""; sentenceIndex += 1 }   // return: next sentence
             else if let c = e.characters { typed += c }
-            setText(title: level.title, detail: "", body: Self.sentence + "\n\n" + typed + "▍")
+            let s = Self.sentences[sentenceIndex % Self.sentences.count]
+            if typed.count >= s.count { typed = ""; sentenceIndex += 1; score += 150; Self.sound("Pop") }
+            showTyping()
             return
         }
         if e.charactersIgnoringModifiers == " " {                     // Space skips
@@ -406,7 +519,7 @@ final class TrackingSession {
 
     /// Drifts across the whole arrangement, speeding up over the level.
     private func fireflyPoint(_ t: Double) -> SIMD2<Float> {
-        let fs = Self.arrangements["ultra"]!
+        let fs = frames.isEmpty ? Self.arrangements["ultra"]! : frames
         let lo = fs.map { $0.centre - $0.half * 0.85 }.reduce(SIMD2(repeating: .infinity)) { simd_min($0, $1) }
         let hi = fs.map { $0.centre + $0.half * 0.85 }.reduce(SIMD2(repeating: -.infinity)) { simd_max($0, $1) }
         let c = (lo + hi) / 2, amp = (hi - lo) / 2

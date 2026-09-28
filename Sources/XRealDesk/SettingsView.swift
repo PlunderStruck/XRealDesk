@@ -339,7 +339,7 @@ private struct PersonalModelControls: View {
                 .disabled(live.trainingModel || live.recordedSessions == 0)
             if live.hasPersonalModel { Button("Use default model") { app.useDefaultTrackingModel() } }
         }
-        Text("A session is a few minutes of short guided tasks in the glasses. Training takes seconds on your Mac and uses every session you've recorded; the result is used only if it measures clearly steadier than the default model on parts of your sessions it didn't learn from. Nothing leaves your Mac.")
+        Text("One session is about 14 minutes of short games in the glasses (read, type, pop bubbles, follow a firefly…) with a progress bar showing how long is left; stop any time and what you've done still counts. Training takes seconds on your Mac; the result is used only if it measures clearly steadier than the default model on parts of the session it didn't learn from. Nothing leaves your Mac.")
             .font(.caption).foregroundStyle(.secondary)
             .onAppear { app.refreshPersonalModelStatus() }
     }
