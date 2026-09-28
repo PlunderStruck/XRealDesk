@@ -20,6 +20,8 @@ final class LiveState: ObservableObject {
     @Published var trainingModel = false
     @Published var hasPersonalModel = false
     @Published var recordedSessions = 0
+    /// A stopped tracking session picks up at this level (0-based) next time.
+    @Published var sessionResumeLevel: Int?
     @Published var imuRate: Double = 0
     /// The glasses are in their side-by-side 3D mode (button), running at 60 Hz.
     @Published var sideBySide = false
@@ -308,6 +310,7 @@ final class AppController: ObservableObject {
                 // "screenN" starts it on glasses screen N (tests).
                 if v == "0" { self.calibration?.cancel() }
                 else if v == "autopilot" { self.startCalibration(); self.calibration?.autopilot = true }
+                else if v == "fresh" { self.startCalibration(fresh: true) }
                 else { self.startCalibration(screen: v.hasPrefix("screen") ? Int(v.dropFirst(6)).map { $0 - 1 } : nil) }
             case "predictor":   // head prediction: 3 = hybrid with neural net (default), 1 = blended linear, 2 = first fit, 0 = constant speed
                 self.hid.predictionModel = Int(v).flatMap(HeadPredictor.Model.init(rawValue:))
@@ -955,6 +958,7 @@ final class AppController: ObservableObject {
         let saved = serial.flatMap(PersonalModel.load)
         let sessions = PersonalModel.sessions().count
         live.recordedSessions = sessions
+        live.sessionResumeLevel = TrackingSession.savedResume()?.level
         live.hasPersonalModel = saved != nil
         live.personalModelStatus = PersonalModel.status(saved, sessions: sessions)
     }
@@ -1011,7 +1015,8 @@ final class AppController: ObservableObject {
     }
 
     /// Starts a guided tracking session across the glasses screens (the one you face shows the text).
-    func startCalibration(screen requested: Int? = nil) {
+    /// - Parameter fresh: start from level 1 instead of picking up a stopped session.
+    func startCalibration(screen requested: Int? = nil, fresh: Bool = false) {
         guard calibration == nil, let compositor, !glassesOff, let win = window else {
             Log.info("A tracking session needs the glasses on and the screens up")
             return
@@ -1052,7 +1057,7 @@ final class AppController: ObservableObject {
         }
         calibration = session
         pendingFocus = nil
-        session.start()
+        session.start(fresh: fresh)
     }
 
     func recenter() {

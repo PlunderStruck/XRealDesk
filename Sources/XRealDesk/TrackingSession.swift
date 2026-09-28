@@ -147,7 +147,8 @@ final class TrackingSession {
 
     // MARK: Start / stop
 
-    func start() {
+    /// - Parameter fresh: start from level 1 even if a stopped session could be picked up.
+    func start(fresh: Bool = false) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         previousApp = NSWorkspace.shared.frontmostApplication
         NSApp.activate(ignoringOtherApps: true)
@@ -155,7 +156,40 @@ final class TrackingSession {
         home.window.makeKeyAndOrderFront(nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.checkVisible() }
         Log.info("Tracking session started on \(screens.count) screen(s) → \(folder.path)")
-        enter(0)
+        if !fresh, let r = Self.savedResume() {
+            score = r.score
+            enter(r.level)
+            Log.info("Tracking session: picking up at level \(r.level + 1)")
+        } else {
+            Self.clearResume()
+            enter(0)
+        }
+    }
+
+    // MARK: Resume
+
+    /// Where a stopped session picks up next time: the first unfinished level and the score so far.
+    /// (Each sitting records its own folder; training uses them all.)
+    struct Resume: Codable { var level: Int; var score: Int; var savedAt: Date }
+    private static var resumeURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/XRealDesk/session-resume.json")
+    }
+    static func savedResume() -> Resume? {
+        guard let data = try? Data(contentsOf: resumeURL), let r = try? JSONDecoder().decode(Resume.self, from: data),
+              r.level > 0, r.level < Level.allCases.count, Date().timeIntervalSince(r.savedAt) < 14 * 86400 else { return nil }
+        return r
+    }
+    static func clearResume() { try? FileManager.default.removeItem(at: resumeURL) }
+    private func saveResume(level: Int) {
+        guard level < Level.allCases.count else { Self.clearResume(); return }
+        if let data = try? JSONEncoder().encode(Resume(level: level, score: score, savedAt: Date())) {
+            try? data.write(to: Self.resumeURL, options: .atomic)
+        }
+    }
+
+    private func writeLabels() {
+        try? ("label,start_s,end_s\n" + labels.joined(separator: "\n") + "\n")
+            .write(to: folder.appendingPathComponent("labels.csv"), atomically: true, encoding: .utf8)
     }
 
     func cancel() { finish(completed: false) }
@@ -262,7 +296,8 @@ final class TrackingSession {
         phase = .ready; dwell = 0; progress = 0; hitAt = nil; onTargetTime = 0
         frames = Self.arrangements[arrangement(level, progress: 0)] ?? []
         let n = Level.allCases.count
-        setText(title: "\(i + 1) of \(n)  ·  \(level.title)", detail: intro(level) + "\n\nRest the ring on the blue dot to start.", body: nil)
+        setText(title: "\(i + 1) of \(n)  ·  \(level.title)", detail: intro(level) + (level == .type ? "\n\nStart typing, or rest the ring on the blue dot, to begin." : "\n\nRest the ring on the blue dot to start.")
+                + "\n→ skips a level  ·  Esc stops (next time picks up here)", body: nil)
         showInstruction("\(level.title): rest the ring on the blue dot")
     }
 
@@ -271,7 +306,7 @@ final class TrackingSession {
         case .focus: return "Read the passage at your normal pace. Keep your head relaxed."
         case .talk: return "Read the passage out loud, like you're on a call."
         case .type: return "Type the sentence shown. Your typing stays inside this session."
-        case .glance: return "When asked, look down at your keyboard, then back at the dot. As fast as is comfortable."
+        case .glance: return "Tip your head down to look at your keyboard, then back up at the dot, 10 times. Each time you're down you'll hear a tick."
         case .pop: return "Bubbles appear on all your screens. Look at each one to pop it. Quick pops build a combo."
         case .firefly: return "Follow the firefly with your eyes and head as it drifts across your screens. It speeds up."
         case .search: return "Among the circles there's one square. Find it and look at it."
@@ -292,7 +327,7 @@ final class TrackingSession {
         case .focus, .talk: setText(title: level.title, detail: "", body: Self.passage)
         case .type: typed = ""; sentenceIndex = 0; showTyping()
         case .glance: glanceCount = 0; glanceDown = false; glanceStart = now; target = SIMD2(0, 0)
-            setText(title: level.title, detail: "", body: nil); showInstruction("Look DOWN at your keyboard")
+            setText(title: level.title, detail: "", body: nil); showInstruction("↓ Look DOWN at your keyboard ↓")
         case .pop: combo = 0; target = randomTarget(awayFrom: SIMD2(0, 0)); setText(title: level.title, detail: "", body: nil)
         case .firefly: setText(title: level.title, detail: "", body: nil)
         case .search: newGrid(); setText(title: level.title, detail: "", body: nil)
@@ -322,14 +357,14 @@ final class TrackingSession {
             return progress / total
         case .glance:
             draw(dots: [(target, glanceDown ? .active : .idle)])
-            if !glanceDown, pitch < -20 {
+            if !glanceDown, pitch < target.y - 12 {
                 glanceDown = true; Self.sound("Tink"); showInstruction("Now back to the dot")
             } else if glanceDown, near(target, 3) {
                 glanceDown = false; glanceCount += 1
                 let secs = now - glanceStart
                 score += max(20, 200 - Int(secs * 60)); glanceStart = now
                 Self.sound("Pop")
-                if glanceCount < Self.glanceRounds { showInstruction(String(format: "%.1f s · look DOWN again", secs)) }
+                if glanceCount < Self.glanceRounds { showInstruction(String(format: "%.1f s  ·  ↓ look DOWN again (%d of %d done)", secs, glanceCount, Self.glanceRounds)) }
             }
             showAim(aim, CGFloat(Double(glanceCount) / Double(Self.glanceRounds)), .systemGreen)
             return Double(glanceCount) / Double(Self.glanceRounds)
@@ -422,6 +457,7 @@ final class TrackingSession {
 
     /// End of the session: the score, and T to train right away (otherwise it closes by itself).
     private func showSummary() {
+        Self.clearResume()
         phase = .summary
         summaryAt = CACurrentMediaTime()
         setOverlay([], false)
@@ -436,7 +472,9 @@ final class TrackingSession {
     private func complete(_ now: CFTimeInterval) {
         if let r = recordStart {
             labels.append(String(format: "%@,%.3f,%.3f", level.label, max(0, levelStart - r), now - r))
+            writeLabels()
         }
+        saveResume(level: levelIndex + 1)
         phase = .done
         doneAt = now
         Self.sound("Hero")
@@ -446,10 +484,14 @@ final class TrackingSession {
     }
 
     private func finish(completed: Bool) {
+        // A level stopped partway still has useful motion in it (it's done again on resume).
+        let now = CACurrentMediaTime()
+        if phase == .running, let r = recordStart, now - levelStart > 10 {
+            labels.append(String(format: "%@,%.3f,%.3f", level.label, max(0, levelStart - r), now - r))
+        }
         if recordStart != nil { hid.stopIMURecording() }
         if !labels.isEmpty {
-            try? ("label,start_s,end_s\n" + labels.joined(separator: "\n") + "\n")
-                .write(to: folder.appendingPathComponent("labels.csv"), atomically: true, encoding: .utf8)
+            writeLabels()
         } else {
             try? FileManager.default.removeItem(at: folder)
         }
@@ -469,23 +511,25 @@ final class TrackingSession {
         let now = CACurrentMediaTime()
         lastKeyAt = now
         if e.keyCode == 53 { cancel(); return }                       // Esc
+        if e.keyCode == 124 {                                         // → skips a level
+            if phase == .running { complete(now) } else if phase == .ready { enter(levelIndex + 1) }
+            return
+        }
         if phase == .summary {
             let train = e.charactersIgnoringModifiers?.lowercased() == "t"
             finish(completed: true)
             if train { onTrainRequested() }
             return
         }
+        let printable = e.characters.map { c in !c.isEmpty && c.unicodeScalars.allSatisfy { $0.value >= 32 && !(0xF700...0xF8FF).contains($0.value) } } ?? false
+        if level == .type, phase == .ready, printable { begin(now) }   // typing starts the typing level
         if level == .type, phase == .running {
             if e.keyCode == 51 { if !typed.isEmpty { typed.removeLast() } }   // delete
             else if e.keyCode == 36 || e.keyCode == 76 { typed = ""; sentenceIndex += 1 }   // return: next sentence
-            else if let c = e.characters { typed += c }
+            else if printable, let c = e.characters { typed += c }
             let s = Self.sentences[sentenceIndex % Self.sentences.count]
             if typed.count >= s.count { typed = ""; sentenceIndex += 1; score += 150; Self.sound("Pop") }
             showTyping()
-            return
-        }
-        if e.charactersIgnoringModifiers == " " {                     // Space skips
-            if phase == .running { complete(now) } else if phase == .ready { enter(levelIndex + 1) }
         }
     }
 
@@ -543,10 +587,12 @@ final class TrackingSession {
     // MARK: Drawing
 
     private func draw(dots: [(SIMD2<Float>, SessionView.DotState)]) {
-        guard usesOverlay || phase == .ready && !dots.isEmpty else { setOverlay([], false); return }
+        // Getting ready: the screens stay up (they show how to play) with just the start dot on top.
+        let hide = usesOverlay && phase != .ready
+        guard hide || phase == .ready && !dots.isEmpty else { setOverlay([], false); return }
         var items: [RendererShaders.OverlayItem] = []
         let m = metresPerDegree
-        if usesOverlay {
+        if hide {
             for f in frames {
                 if let c = surface(f.centre) {
                     items.append(.frame(c, halfSize: f.half * m, line: 0.15 * m, color: SIMD4(0.22, 0.28, 0.42, 1)))
@@ -559,8 +605,8 @@ final class TrackingSession {
             items.append(.circle(c, radius: 0.95 * m, color: SIMD4(1, 1, 1, 1)))
             items.append(.circle(c, radius: 0.78 * m, color: fill))
         }
-        setOverlay(items, usesOverlay)
-        if !usesOverlay { for s in screens where s.visible { s.window.view.show(dots: [], grid: nil, score: score) } }
+        setOverlay(items, hide)
+        if !hide { for s in screens where s.visible { s.window.view.show(dots: [], grid: nil, score: score) } }
     }
 
     private func drawGrid() {

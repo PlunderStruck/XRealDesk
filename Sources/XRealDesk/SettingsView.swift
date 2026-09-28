@@ -334,12 +334,17 @@ private struct PersonalModelControls: View {
     var body: some View {
         Text(live.personalModelStatus).font(.callout)
         HStack {
-            Button("Record a session…") { app.startCalibration() }
+            if let l = live.sessionResumeLevel {
+                Button("Continue session (level \(l + 1) of \(TrackingSession.Level.allCases.count))…") { app.startCalibration() }
+                Button("Start over") { app.startCalibration(fresh: true) }
+            } else {
+                Button("Record a session…") { app.startCalibration() }
+            }
             Button(live.trainingModel ? "Training…" : "Train my model") { app.trainPersonalModel() }
                 .disabled(live.trainingModel || live.recordedSessions == 0)
             if live.hasPersonalModel { Button("Use default model") { app.useDefaultTrackingModel() } }
         }
-        Text("One session is about 14 minutes of short games in the glasses (read, type, pop bubbles, follow a firefly…) with a progress bar showing how long is left; stop any time and what you've done still counts. Training takes seconds on your Mac; the result is used only if it measures clearly steadier than the default model on parts of the session it didn't learn from. Nothing leaves your Mac.")
+        Text("One session is about 14 minutes of short games in the glasses (read, type, pop bubbles, follow a firefly…) with a progress bar showing how long is left; stop any time and what you've done still counts, and next time it picks up where you stopped. Training takes seconds on your Mac; the result is used only if it measures clearly steadier than the default model on parts of the session it didn't learn from. Nothing leaves your Mac.")
             .font(.caption).foregroundStyle(.secondary)
             .onAppear { app.refreshPersonalModelStatus() }
     }
