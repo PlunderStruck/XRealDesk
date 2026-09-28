@@ -19,9 +19,14 @@ public enum PersonalTrainer {
         public var shipped: (still: Float, moving: Float, panning: Float)
         public var personal: (still: Float, moving: Float, panning: Float)
         public var minutes: Double
-        /// Clearly better while moving and not worse while still.
+        /// Clearly steadier while moving and as steady when still: used without asking.
         public var isBetter: Bool {
             personal.moving < shipped.moving * 0.97 && personal.still <= shipped.still * 1.01
+        }
+        /// Clearly steadier while moving but a little less steady when still: worth trying, the
+        /// wearer decides (blind comparison).
+        public var isWorthTrying: Bool {
+            !isBetter && personal.moving < shipped.moving * 0.9 && personal.still <= shipped.still * PersonalTrainer.offerStill
         }
     }
 
@@ -33,6 +38,8 @@ public enum PersonalTrainer {
         public var anchor: Float = 1e-4
         /// Start the net from random weights instead of the shipped ones (tests only).
         public var fromScratch = false
+        /// Keep the shipped still-head fit; train only the net (motion).
+        public var keepShippedStill = false
         public var seed: UInt64 = 1
         public init() {}
     }
@@ -40,6 +47,10 @@ public enum PersonalTrainer {
     static let pxPerDeg: Float = 1920 / 46
     static let evalMs = 37
     static let stillMU = 30.0
+    /// Still-head jitter a model may lose (×) and still be offered to try.
+    static let offerStill: Float = 1.06
+    /// Where a personal net may take over from the shipped one (°/s); nil = at every speed.
+    static let handovers: [SIMD2<Float>?] = [nil, SIMD2(4, 8), SIMD2(6, 12), SIMD2(10, 20), SIMD2(15, 30)]
 
     // MARK: Data
 
@@ -113,13 +124,36 @@ public enum PersonalTrainer {
         }
         guard d.count > 20_000 else { return nil }
         progress?(0.05)
-        let still = fitStill(d)
+        let fitted = options.keepShippedStill ? HeadPredictor.shipped.still : fitStill(d)
         progress?(0.1)
-        let net = fitNet(d, options: options) { progress?(0.1 + 0.85 * $0) }
-        let personal = HeadPredictor.Personal(still: still, net: net)
-        guard personal.isUsable else { return nil }
+        let net = fitNet(d, options: options) { progress?(0.1 + 0.8 * $0) }
         let shippedScore = score(HeadPredictor.shipped, d)
-        let personalScore = score(personal, d)
+        // Each part is kept only where it helps: the wearer's still fit or the shipped one, and the
+        // wearer's net from whichever head speed up keeps the still-head score (slow drifts) intact.
+        var candidates: [HeadPredictor.Personal] = []
+        for still in options.keepShippedStill ? [HeadPredictor.shipped.still] : [HeadPredictor.shipped.still, fitted] {
+            for hv in handovers { candidates.append(HeadPredictor.Personal(still: still, net: net, handover: hv)) }
+        }
+        let verbose = ProcessInfo.processInfo.environment["TRAIN_VERBOSE"] != nil
+        var best: (model: HeadPredictor.Personal, score: (still: Float, moving: Float, panning: Float))?
+        for (k, c) in candidates.enumerated() where c.isUsable {
+            let s = score(c, d)
+            progress?(0.9 + 0.1 * Double(k + 1) / Double(candidates.count))
+            if verbose {
+                print(String(format: "  %@ still, net from %@: still %.3f moving %.3f panning %.3f",
+                             c.still == HeadPredictor.shipped.still ? "shipped" : "personal",
+                             c.handover.map { String(format: "%.0f–%.0f°/s", $0.x, $0.y) } ?? "all speeds", s.still, s.moving, s.panning))
+            }
+            // Best while moving among those that keep still-head steadiness (within 1%, else within
+            // 6%, which is left to the wearer to judge); failing both, the steadiest when still.
+            func tier(_ x: Float) -> Int { x <= shippedScore.still * 1.01 ? 0 : x <= shippedScore.still * Self.offerStill ? 1 : 2 }
+            if let b = best {
+                let (ts, tb) = (tier(s.still), tier(b.score.still))
+                if ts < tb || ts == tb && (ts < 2 ? s.moving < b.score.moving : s.still < b.score.still) { best = (c, s) }
+            } else { best = (c, s) }
+        }
+        guard let best else { return nil }
+        let personal = best.model, personalScore = best.score
         progress?(1)
         let minutes = Double(d.count) * 0.002 / 60
         return Result(model: personal, shipped: shippedScore, personal: personalScore, minutes: minutes)

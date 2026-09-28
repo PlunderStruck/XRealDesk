@@ -19,6 +19,8 @@ final class LiveState: ObservableObject {
     @Published var personalModelStatus = ""
     @Published var trainingModel = false
     @Published var hasPersonalModel = false
+    /// A trained model waiting for the wearer's verdict (blind A/B, then Use it).
+    @Published var hasCandidateModel = false
     @Published var recordedSessions = 0
     /// A stopped tracking session picks up at this level (0-based) next time.
     @Published var sessionResumeLevel: Int?
@@ -106,6 +108,8 @@ final class AppController: ObservableObject {
 
     private var blindMapping: [HeadPredictor.Model] = []
     private var blindIndex = 0
+    /// Blind A/B of the model in use against a newly trained one (when there is one).
+    private var blindModels: [(name: String, model: HeadPredictor.Personal)] = []
     /// Scan-out compensation strength (`set scanscale=0.4`; see Compositor.Config.scanScale).
     private var scanScale: Float = 0.4
 
@@ -956,11 +960,13 @@ final class AppController: ObservableObject {
     func refreshPersonalModelStatus() {
         let serial = deviceInfo?.serial
         let saved = serial.flatMap(PersonalModel.load)
+        let candidate = serial.flatMap(PersonalModel.loadCandidate)
         let sessions = PersonalModel.sessions().count
         live.recordedSessions = sessions
         live.sessionResumeLevel = TrackingSession.savedResume()?.level
         live.hasPersonalModel = saved != nil
-        live.personalModelStatus = PersonalModel.status(saved, sessions: sessions)
+        live.hasCandidateModel = candidate != nil
+        live.personalModelStatus = PersonalModel.status(saved, candidate: candidate, sessions: sessions)
     }
 
     /// Trains a model from the recorded sessions and uses it only if it's clearly steadier than the
@@ -993,13 +999,20 @@ final class AppController: ObservableObject {
                 }
                 Log.info(String(format: "Personal model: jitter while moving %.3f → %.3f px, still %.3f → %.3f px (%.0f min)",
                                 r.shipped.moving, r.personal.moving, r.shipped.still, r.personal.still, r.minutes))
-                let gain = (1 - r.personal.moving / max(r.shipped.moving, 1e-6)) * 100
+                self.blindModels = []
                 if r.isBetter {
                     PersonalModel.save(r, serial: serial)
+                    PersonalModel.removeCandidate(serial: serial)
                     HeadPredictor.current = r.model
-                    self.window?.hostView.showHUD(String(format: "Your tracking model is %.0f%% steadier while moving: using it", gain), seconds: 4)
+                    let s = PersonalModel.load(serial: serial)?.summary ?? ""
+                    self.window?.hostView.showHUD("Your tracking model is \(s): using it", seconds: 5)
+                } else if r.isWorthTrying {
+                    PersonalModel.save(r, serial: serial, candidate: true)
+                    let s = PersonalModel.loadCandidate(serial: serial)?.summary ?? ""
+                    self.window?.hostView.showHUD("Your model is \(s). Compare blind with ⌃⌥B, then choose in Settings", seconds: 8)
                 } else {
-                    self.window?.hostView.showHUD(String(format: "Your model wasn't clearly steadier (%+.0f%%): keeping the current one", gain), seconds: 4)
+                    PersonalModel.removeCandidate(serial: serial)
+                    self.window?.hostView.showHUD("Your model wasn't clearly steadier than the current one: keeping it", seconds: 5)
                 }
                 self.refreshPersonalModelStatus()
             }
@@ -1008,9 +1021,32 @@ final class AppController: ObservableObject {
 
     /// Back to the shipped tracking model (the personal one is deleted).
     func useDefaultTrackingModel() {
-        if let serial = deviceInfo?.serial { PersonalModel.remove(serial: serial) }
+        if let serial = deviceInfo?.serial { PersonalModel.remove(serial: serial); PersonalModel.removeCandidate(serial: serial) }
         HeadPredictor.current = HeadPredictor.shipped
+        endBlindCompare()
         refreshPersonalModelStatus()
+    }
+
+    /// The newly trained model (the candidate) becomes the one in use.
+    func useCandidateTrackingModel() {
+        guard let serial = deviceInfo?.serial, let s = PersonalModel.adoptCandidate(serial: serial), let m = PersonalModel.model(s) else { return }
+        HeadPredictor.current = m
+        endBlindCompare()
+        hud("Using your tracking model")
+        refreshPersonalModelStatus()
+    }
+
+    /// Keeps the model in use and drops the candidate.
+    func discardCandidateTrackingModel() {
+        guard let serial = deviceInfo?.serial else { return }
+        PersonalModel.removeCandidate(serial: serial)
+        loadPersonalModel(serial: serial)
+        endBlindCompare()
+    }
+
+    private func endBlindCompare() {
+        blindModels = []
+        hid.predictionModel = .hybrid
         hud("Using the default tracking model")
     }
 
@@ -1137,10 +1173,25 @@ final class AppController: ObservableObject {
             hud("Subpixel text: \(names[settings.subpixel])")
         case .blindCompare:
             // Blind A/B of two head predictors: which is A and which is B is random per launch and
-            // written to ab-mapping.txt only (read it after deciding).
+            // written to ab-mapping.txt only (read it after deciding). With a newly trained model
+            // waiting, it's that one against the model in use.
+            let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/XRealDesk")
+            if blindModels.isEmpty, let serial = deviceInfo?.serial,
+               let c = PersonalModel.loadCandidate(serial: serial).flatMap(PersonalModel.model) {
+                let inUse = PersonalModel.load(serial: serial).flatMap(PersonalModel.model)
+                blindModels = [(inUse == nil ? "default" : "your earlier model", inUse ?? HeadPredictor.shipped), ("newly trained", c)].shuffled()
+                try? "A=\(blindModels[0].name) B=\(blindModels[1].name)\n".write(to: dir.appendingPathComponent("ab-mapping.txt"), atomically: true, encoding: .utf8)
+                blindIndex = 1
+            }
+            if !blindModels.isEmpty {
+                blindIndex = 1 - blindIndex
+                hid.predictionModel = .hybrid
+                HeadPredictor.current = blindModels[blindIndex].model
+                window?.hostView.showHUD(blindIndex == 0 ? "Model A" : "Model B")
+                return
+            }
             if blindMapping.isEmpty {
                 blindMapping = [HeadPredictor.Model.blended, .hybrid].shuffled()
-                let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/XRealDesk")
                 try? "A=\(blindMapping[0]) B=\(blindMapping[1])\n".write(to: dir.appendingPathComponent("ab-mapping.txt"), atomically: true, encoding: .utf8)
                 blindIndex = 1
             }

@@ -184,5 +184,5 @@ func trainPersonal(sessions: [String], calibrationPath: String) {
     guard let r = PersonalTrainer.train(sessions: sessions.map { URL(fileURLWithPath: $0) }, calibration: cal, options: o) else { print("not enough data"); return }
     print(String(format: "  %.1f min of sessions, trained in %.1f s", r.minutes, CFAbsoluteTimeGetCurrent() - t0))
     print(String(format: "  held-back jitter (px): shipped still %.3f moving %.3f panning %.3f", r.shipped.still, r.shipped.moving, r.shipped.panning))
-    print(String(format: "                        personal still %.3f moving %.3f panning %.3f  → %@", r.personal.still, r.personal.moving, r.personal.panning, r.isBetter ? "better, would be used" : "not clearly better, default kept"))
+    print(String(format: "                        personal still %.3f moving %.3f panning %.3f  (net from %@) → %@", r.personal.still, r.personal.moving, r.personal.panning, r.model.handover.map { String(format: "%.0f°/s", $0.x) } ?? "all speeds", r.isBetter ? "better, would be used" : r.isWorthTrying ? "offered to try (blind A/B)" : "not clearly better, default kept"))
 }

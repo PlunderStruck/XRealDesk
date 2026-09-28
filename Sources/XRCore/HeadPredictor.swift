@@ -117,7 +117,12 @@ public struct HeadPredictor: Sendable {
     public struct Personal: Sendable {
         public var still: [[SIMD3<Float>]]
         public var net: Net
-        public init(still: [[SIMD3<Float>]], net: Net) { self.still = still; self.net = net }
+        /// Head speeds (°/s) over which this net takes over from the shipped one; nil: this net at
+        /// every speed. (A personal net can be steadier when moving but not in slow drifts.)
+        public var handover: SIMD2<Float>?
+        public init(still: [[SIMD3<Float>]], net: Net, handover: SIMD2<Float>? = nil) {
+            self.still = still; self.net = net; self.handover = handover
+        }
         public var isUsable: Bool {
             still.count == horizonsMs.count && still.allSatisfy { $0.count == featureCount }
                 && still.allSatisfy { $0.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite } } && net.isUsable
@@ -169,8 +174,18 @@ public struct HeadPredictor: Sendable {
         let x = min(max((speed(f) - lo) / max(hi - lo, 1e-3), 0), 1)
         let t = x * x * (3 - 2 * x)
         let still = rotation(f, seconds: seconds, weights: p.still)
-        guard t > 0, let h = netHidden(f, net: p.net),
-              let net = netRotation(hidden: h, seconds: seconds, w3: p.net.w3, b3: p.net.b3) else { return still }
+        func output(_ n: Net) -> SIMD3<Float>? {
+            netHidden(f, net: n).flatMap { netRotation(hidden: $0, seconds: seconds, w3: n.w3, b3: n.b3) }
+        }
+        guard t > 0 else { return still }
+        var u: Float = 1
+        if let hv = p.handover {
+            let y = min(max((speed(f) - hv.x) / max(hv.y - hv.x, 1e-3), 0), 1)
+            u = y * y * (3 - 2 * y)
+        }
+        let mine = u > 0 ? output(p.net) : nil, base = u < 1 ? output(shippedNet) : nil
+        guard let net = u >= 1 ? mine : u <= 0 ? base : mine.flatMap({ m in base.map { m * u + $0 * (1 - u) } })
+        else { return still }
         return still * (1 - t) + net * t
     }
 

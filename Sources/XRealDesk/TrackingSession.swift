@@ -94,6 +94,7 @@ final class TrackingSession {
     private var typed = ""
     private var sentenceIndex = 0
     private var finaleSegment = -1
+    private var fireflyPhase = 0.0
     private var summaryAt: CFTimeInterval = 0
     private var searchGrid: (screen: Int, odd: Int, cols: Int, rows: Int, letter: Character, oddLetter: Character) = (0, 0, 7, 4, "O", "Q")
     private var onTargetTime = 0.0
@@ -280,7 +281,7 @@ final class TrackingSession {
     private var startTarget: SIMD2<Float> {
         switch level {
         case .focus, .talk, .type: return textDot
-        case .firefly: return fireflyPoint(0)
+        case .firefly: return fireflyPoint(0)   // fireflyPhase is 0 until the level begins
         default: return SIMD2(0, 0)
         }
     }
@@ -329,7 +330,7 @@ final class TrackingSession {
         case .glance: glanceCount = 0; glanceDown = false; glanceStart = now; target = SIMD2(0, 0)
             setText(title: level.title, detail: "", body: nil); showInstruction("↓ Look DOWN at your keyboard ↓")
         case .pop: combo = 0; target = randomTarget(awayFrom: SIMD2(0, 0)); setText(title: level.title, detail: "", body: nil)
-        case .firefly: setText(title: level.title, detail: "", body: nil)
+        case .firefly: fireflyPhase = 0; setText(title: level.title, detail: "", body: nil)
         case .search: newGrid(); setText(title: level.title, detail: "", body: nil)
         case .shift: target = SIMD2(0, 0); setText(title: level.title, detail: "", body: nil)
         case .finale: finaleSegment = -1; combo = 0; setText(title: level.title, detail: "", body: nil)
@@ -386,7 +387,7 @@ final class TrackingSession {
             if segment % 2 == 0 {
                 _ = popStep(now: now, dt: dt, near: near, multiplier: 2, dwellNeeded: 0.2)
             } else {
-                target = fireflyPoint(t * (1.2 + Double(segment) * 0.08))
+                target = moveFirefly(dt: dt, peakDegreesPerSecond: min(Self.fireflyMaxSpeed, 40 + 4 * Double(segment)))
                 let on = near(target, 3.5)
                 if on { score += Int(dt * 120) }
                 draw(dots: [(target, on ? .done : .active)])
@@ -399,7 +400,7 @@ final class TrackingSession {
             if let f = Self.arrangements[wanted], f.count != frames.count || f.first?.centre != frames.first?.centre {
                 frames = f; Self.sound("Purr"); showInstruction("It's moving to a new arrangement")
             }
-            target = fireflyPoint(t)
+            target = moveFirefly(dt: dt, peakDegreesPerSecond: 20 + 35 * min(t / Self.levelSeconds[.firefly]!, 1))
             let on = near(target, 3.5)
             if on { onTargetTime += dt; score += Int(dt * 60) }
             draw(dots: [(target, on ? .done : .active)])
@@ -561,14 +562,29 @@ final class TrackingSession {
         return frames[0].centre
     }
 
-    /// Drifts across the whole arrangement, speeding up over the level.
-    private func fireflyPoint(_ t: Double) -> SIMD2<Float> {
+    /// Fastest the firefly ever moves (°/s): brisk but comfortable to follow with the head.
+    /// (It used to speed up with time², which reached ~380°/s late in the Encore.)
+    static let fireflyMaxSpeed = 60.0
+
+    private var fireflyBox: (centre: SIMD2<Float>, amp: SIMD2<Float>) {
         let fs = frames.isEmpty ? Self.arrangements["ultra"]! : frames
         let lo = fs.map { $0.centre - $0.half * 0.85 }.reduce(SIMD2(repeating: .infinity)) { simd_min($0, $1) }
         let hi = fs.map { $0.centre + $0.half * 0.85 }.reduce(SIMD2(repeating: -.infinity)) { simd_max($0, $1) }
-        let c = (lo + hi) / 2, amp = (hi - lo) / 2
-        let phase = 2 * Double.pi * (t / 9 + t * t / 900)
+        return ((lo + hi) / 2, (hi - lo) / 2)
+    }
+
+    /// Drifts across the whole arrangement (a Lissajous path) at the given phase.
+    private func fireflyPoint(_ phase: Double) -> SIMD2<Float> {
+        let (c, amp) = fireflyBox
         return SIMD2(c.x + amp.x * Float(sin(phase)), c.y + amp.y * Float(sin(phase * 1.7 + 0.6)))
+    }
+
+    /// Moves the firefly on so its fastest point on the path goes `peakDegreesPerSecond`.
+    private func moveFirefly(dt: Double, peakDegreesPerSecond v: Double) -> SIMD2<Float> {
+        let amp = fireflyBox.amp
+        let reach = Double(simd_length(SIMD2(amp.x, amp.y * 1.7)))   // path speed per unit of phase rate
+        fireflyPhase += dt * min(v, Self.fireflyMaxSpeed) / max(reach, 1)
+        return fireflyPoint(fireflyPhase)
     }
 
     private func newGrid() {

@@ -342,7 +342,13 @@ private struct PersonalModelControls: View {
             }
             Button(live.trainingModel ? "Training…" : "Train my model") { app.trainPersonalModel() }
                 .disabled(live.trainingModel || live.recordedSessions == 0)
-            if live.hasPersonalModel { Button("Use default model") { app.useDefaultTrackingModel() } }
+            if live.hasPersonalModel || live.hasCandidateModel { Button("Use default model") { app.useDefaultTrackingModel() } }
+        }
+        if live.hasCandidateModel {
+            HStack {
+                Button("Use my new model") { app.useCandidateTrackingModel() }
+                Button(live.hasPersonalModel ? "Keep my earlier model" : "Keep the default") { app.discardCandidateTrackingModel() }
+            }
         }
         Text("One session is about 14 minutes of short games in the glasses (read, type, pop bubbles, follow a firefly…) with a progress bar showing how long is left; stop any time and what you've done still counts, and next time it picks up where you stopped. Training takes seconds on your Mac; the result is used only if it measures clearly steadier than the default model on parts of the session it didn't learn from. Nothing leaves your Mac.")
             .font(.caption).foregroundStyle(.secondary)
