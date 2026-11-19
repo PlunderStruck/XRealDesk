@@ -1,23 +1,20 @@
-# <img src="docs/app-icon.png" width="40" height="40" alt=""> XRealDesk
-
-Use your XREAL Air glasses as extra screens for your Mac.
-
-## [⬇ Download XRealDesk for Mac](https://github.com/PlunderStruck/XRealDesk/releases/download/v1.0.0/XRealDesk-1.0.0-macOS.zip)
-
-One download for Apple silicon and Intel Macs running macOS 14 or later. Works with XREAL Air, Air 2, Air 2 Pro and Air 2 Ultra.
+<p align="center"><img src="docs/readme-banner.png" width="100%" alt="XRealDesk · Your Mac screens, in your glasses."></p>
+<p align="center"><a href="https://github.com/PlunderStruck/XRealDesk/releases/download/v1.0.0/XRealDesk-1.0.0-macOS.zip"><img src="docs/download-mac.png" width="297" alt="Download XRealDesk for Mac"></a><br><sub>macOS 14 or later · Apple silicon and Intel · <a href="#compatibility">Check your glasses</a></sub></p>
 
 ## Install
 
-1. **Find your download.** Click **Download XRealDesk for Mac** above. Click the blue smiling face (**Finder**) in your Dock, then choose **Downloads** on the left.
-2. **Move the app to Applications.** If you see **XRealDesk-1.0.0-macOS.zip**, double-click it to unpack the app. When you see the **XRealDesk** app icon, drag it onto **Applications** on the left of the Finder window.
-3. **Open XRealDesk.** Click **Applications** in Finder, then double-click **XRealDesk**. If the setup window appears, skip to **Connect your glasses** below.
-
-### If your Mac says it can’t verify XRealDesk
-
-Apple hasn’t checked this release. If you downloaded the app using the link above and trust it, dismiss the warning, then open the **Apple menu  → System Settings → Privacy & Security**. Scroll down to **Security**, find the message about XRealDesk, and click **Open Anyway**. Confirm when your Mac asks.
+<table>
+<tr><td><strong>1 &nbsp; Unzip</strong></td><td>Open <strong>Finder → Downloads</strong>. Double-click the XRealDesk ZIP. Already see the app? Go to step 2.</td></tr>
+<tr><td><strong>2 &nbsp; Move</strong></td><td>Drag the <strong>XRealDesk</strong> app onto <strong>Applications</strong> in the Finder sidebar.</td></tr>
+<tr><td><strong>3 &nbsp; Open</strong></td><td>Click <strong>Applications</strong>, then double-click <strong>XRealDesk</strong>.</td></tr>
+</table>
 
 <details>
-<summary><strong>Can’t find “Open Anyway”? Click here for the Terminal steps.</strong></summary>
+<summary><strong>Mac says it can’t verify XRealDesk? Open this first-launch guide.</strong></summary>
+
+Apple hasn’t checked this release. If you trust the app you downloaded here, dismiss the warning. Open **Apple menu  → System Settings → Privacy & Security**. Under **Security**, click **Open Anyway** next to XRealDesk and confirm.
+
+**If you can’t find Open Anyway**, follow these steps.
 
 1. Make sure you moved **XRealDesk** into **Applications** in step 2.
 2. Press **Command (⌘) + Space** to open search. Type **Terminal** and press **Return**. Terminal is the Mac app where you can paste written commands.
@@ -29,15 +26,13 @@ Apple hasn’t checked this release. If you downloaded the app using the link ab
 
 </details>
 
-### Connect your glasses
-
-Plug your glasses into a USB-C port on your Mac using the glasses’ video cable. In the XRealDesk setup window, follow the prompt to allow **Screen Recording** so your Mac can show windows in the glasses. **Accessibility** is optional. Turn it on if you want XRealDesk to move windows back to their screens and focus the window you look at.
-
-**Try it.** Drag a window up past the top edge of your Mac’s screen. You should see it in the glasses. Look straight ahead and press **Control + Option + R** to center the screens in front of you.
+> [!TIP]
+> **See your first screen.** Plug in your glasses with their USB-C video cable. Follow the setup window and allow **Screen Recording** so XRealDesk can show your windows in the glasses. Then drag a window past the top of your Mac screen.
 
 ## Your first workspace
 
 - **Move a window into the glasses.** By default, the virtual displays sit above your Mac screen. Drag a window through the top edge. To change the crossing edge, open **Settings → Screens**.
+- **Accessibility (optional).** Allow it during setup if you want XRealDesk to restore window positions and focus the window you look at.
 - **Choose a layout.** Click the glasses icon in the menu bar or press **Control + Option + X**. Pick a single wide display, a row of screens, or a grid. Click a screen in the 3D view to bring it in front of you.
 - **Recenter.** Look straight ahead and press **Control + Option + R**. Reopen the setup assistant from the wand in the control panel to adjust alignment.
 - **Disconnect.** When you quit or unplug the glasses, macOS moves the windows back to your Mac. XRealDesk restores mirroring when it quits.
