@@ -24,7 +24,9 @@ open /Applications/XRealDesk.app
 </details>
 
 > [!TIP]
-> Connect your glasses with their USB-C cable. Allow **Screen Recording** when prompted so XRealDesk can display your windows.
+> Plug in your glasses. If macOS asks whether to mirror or extend your screen, choose **Mirror**. XRealDesk switches to extended mode automatically and sets up your virtual screens.
+>
+> Allow **Screen Recording** when prompted so XRealDesk can display your windows.
 
 ## Your first workspace
 
