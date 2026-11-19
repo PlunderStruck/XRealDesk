@@ -1,28 +1,39 @@
-<p align="center"><img src="docs/app-icon.png" width="96" height="96" alt=""></p>
-<h1 align="center">XRealDesk</h1>
-<p align="center"><strong>Up to eight Mac displays in your XREAL Air glasses.</strong></p>
-<p align="center"><a href="https://github.com/PlunderStruck/XRealDesk/releases/download/v1.0.0/XRealDesk-1.0.0-macOS.zip"><strong>Download XRealDesk 1.0 for macOS ↓</strong></a> &nbsp; · &nbsp; <a href="#install">Install guide</a> &nbsp; · &nbsp; <a href="#keyboard-shortcuts">Keyboard shortcuts</a></p>
+# <img src="docs/app-icon.png" width="40" height="40" alt=""> XRealDesk
 
-Drag a window above your Mac screen and it appears in your glasses. Arrange your displays in a curve, turn your head to look along the row, and press **Control + Option + R** to bring the workspace back in front of you.
+Use your XREAL Air glasses as extra screens for your Mac.
 
-| What you need | Compatibility |
-| --- | --- |
-| Mac | macOS 14 or later, Apple silicon or Intel with Metal graphics |
-| Glasses | XREAL Air, Air 2, Air 2 Pro (tested), or Air 2 Ultra. The One and One Pro use a different protocol and are unsupported. |
-| Connection | A USB-C port and cable that carry video |
+## [⬇ Download XRealDesk for Mac](https://github.com/PlunderStruck/XRealDesk/releases/download/v1.0.0/XRealDesk-1.0.0-macOS.zip)
+
+One download for Apple silicon and Intel Macs running macOS 14 or later. Works with XREAL Air, Air 2, Air 2 Pro and Air 2 Ultra.
 
 ## Install
 
-1. **[Download XRealDesk for macOS](https://github.com/PlunderStruck/XRealDesk/releases/download/v1.0.0/XRealDesk-1.0.0-macOS.zip)**, double-click the ZIP, and drag **XRealDesk.app** into **Applications**.
-2. Open **XRealDesk** from Applications. This community build has no Apple Developer ID or Apple notarization, so macOS may block the first launch.
-3. If macOS says it cannot verify the developer and you trust the ZIP you downloaded from this project's release, open **Terminal** and run the commands below. The first removes the download quarantine marker from this app. The second opens it.
+1. **Find your download.** Click **Download XRealDesk for Mac** above. Click the blue smiling face (**Finder**) in your Dock, then choose **Downloads** on the left.
+2. **Move the app to Applications.** If you see **XRealDesk-1.0.0-macOS.zip**, double-click it to unpack the app. When you see the **XRealDesk** app icon, drag it onto **Applications** on the left of the Finder window.
+3. **Open XRealDesk.** Click **Applications** in Finder, then double-click **XRealDesk**. If the setup window appears, skip to **Connect your glasses** below.
+
+### If your Mac says it can’t verify XRealDesk
+
+Apple hasn’t checked this release. If you downloaded the app using the link above and trust it, dismiss the warning, then open the **Apple menu  → System Settings → Privacy & Security**. Scroll down to **Security**, find the message about XRealDesk, and click **Open Anyway**. Confirm when your Mac asks.
+
+<details>
+<summary><strong>Can’t find “Open Anyway”? Click here for the Terminal steps.</strong></summary>
+
+1. Make sure you moved **XRealDesk** into **Applications** in step 2.
+2. Press **Command (⌘) + Space** to open search. Type **Terminal** and press **Return**. Terminal is the Mac app where you can paste written commands.
+3. Copy the whole line below. Click inside the Terminal window, press **Command (⌘) + V** to paste, then press **Return**. This clears the downloaded-file warning for this copy of XRealDesk and opens the app.
 
    ```sh
-   xattr -d com.apple.quarantine /Applications/XRealDesk.app
-   open /Applications/XRealDesk.app
+   xattr -d com.apple.quarantine /Applications/XRealDesk.app; open /Applications/XRealDesk.app
    ```
 
-4. Plug in the glasses and follow the setup assistant. Grant **Screen Recording** so XRealDesk can draw your Mac windows in the glasses. **Accessibility** is optional and lets XRealDesk restore window positions and focus the window you look at.
+</details>
+
+### Connect your glasses
+
+Plug your glasses into a USB-C port on your Mac using the glasses’ video cable. In the XRealDesk setup window, follow the prompt to allow **Screen Recording** so your Mac can show windows in the glasses. **Accessibility** is optional. Turn it on if you want XRealDesk to move windows back to their screens and focus the window you look at.
+
+**Try it.** Drag a window up past the top edge of your Mac’s screen. You should see it in the glasses. Look straight ahead and press **Control + Option + R** to center the screens in front of you.
 
 ## Your first workspace
 
@@ -85,6 +96,14 @@ The Air 2 Pro shows about 49 pixels per degree (1920 px across ~39°). A 1600×9
 one screen pixel to one glasses pixel, which is the default. In Settings, **Sharpest size for this
 resolution** computes this for any resolution. **HiDPI** renders each screen at 2× and filters it down,
 which gives the smoothest text at some GPU cost. **Text sharpening** helps when screens are scaled.
+
+## Compatibility
+
+| What you need | Compatibility |
+| --- | --- |
+| Mac | macOS 14 or later, Apple silicon or Intel with Metal graphics |
+| Glasses | XREAL Air, Air 2, Air 2 Pro (tested), or Air 2 Ultra. The One and One Pro use a different protocol and are unsupported. |
+| Connection | A USB-C port and cable that carry video |
 
 ## Troubleshooting
 
