@@ -4,30 +4,27 @@
 ## Install
 
 <table>
-<tr><td><strong>1 &nbsp; Unzip</strong></td><td>Open <strong>Finder → Downloads</strong>. Double-click the XRealDesk ZIP. Already see the app? Go to step 2.</td></tr>
-<tr><td><strong>2 &nbsp; Move</strong></td><td>Drag the <strong>XRealDesk</strong> app onto <strong>Applications</strong> in the Finder sidebar.</td></tr>
-<tr><td><strong>3 &nbsp; Open</strong></td><td>Click <strong>Applications</strong>, then double-click <strong>XRealDesk</strong>.</td></tr>
+<tr><td><strong>1</strong></td><td>Double-click the downloaded ZIP.</td></tr>
+<tr><td><strong>2</strong></td><td>Drag <strong>XRealDesk</strong> into <strong>Applications</strong>.</td></tr>
+<tr><td><strong>3</strong></td><td>Open <strong>XRealDesk</strong> from Applications.</td></tr>
 </table>
 
 <details>
-<summary><strong>Mac says it can’t verify XRealDesk? Open this first-launch guide.</strong></summary>
+<summary><strong>If macOS can’t verify XRealDesk</strong></summary>
 
-Apple hasn’t checked this release. If you trust the app you downloaded here, dismiss the warning. Open **Apple menu  → System Settings → Privacy & Security**. Under **Security**, click **Open Anyway** next to XRealDesk and confirm.
+This release hasn’t been notarized by Apple. If you trust this download, go to **System Settings → Privacy & Security** and choose **Open Anyway** for XRealDesk.
 
-**If you can’t find Open Anyway**, follow these steps.
+If that option is unavailable, run these commands in **Terminal** to clear the download warning for XRealDesk and open the app.
 
-1. Make sure you moved **XRealDesk** into **Applications** in step 2.
-2. Press **Command (⌘) + Space** to open search. Type **Terminal** and press **Return**. Terminal is the Mac app where you can paste written commands.
-3. Copy the whole line below. Click inside the Terminal window, press **Command (⌘) + V** to paste, then press **Return**. This clears the downloaded-file warning for this copy of XRealDesk and opens the app.
-
-   ```sh
-   xattr -d com.apple.quarantine /Applications/XRealDesk.app; open /Applications/XRealDesk.app
-   ```
+```sh
+xattr -d com.apple.quarantine /Applications/XRealDesk.app
+open /Applications/XRealDesk.app
+```
 
 </details>
 
 > [!TIP]
-> **See your first screen.** Plug in your glasses with their USB-C video cable. Follow the setup window and allow **Screen Recording** so XRealDesk can show your windows in the glasses. Then drag a window past the top of your Mac screen.
+> Connect your glasses with their USB-C cable. Allow **Screen Recording** when prompted so XRealDesk can display your windows.
 
 ## Your first workspace
 
